@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -13,6 +14,7 @@ from scraper.login import login
 from scraper.crawl_course import crawl_course
 from scraper.extract_lesson import extract_lesson
 from pipeline.summarize import process_lesson_ai
+from pipeline.enrich_attachments import enrich_attachments_for_file, enrich_attachments_for_all
 from pipeline.generate_markdown import generate_obsidian_markdown
 from pipeline.generate_module_index import generate_indexes
 
@@ -23,7 +25,7 @@ logger = setup_processing_logger()
 RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parent / "data" / "processed"
 
-def run_full_pipeline(mock=False, limit=None, skip_ai=False):
+def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None):
     """
     Executa o fluxo completo do pipeline (ETL):
     1. Sincroniza o índice do curso (sync).
@@ -58,7 +60,7 @@ def run_full_pipeline(mock=False, limit=None, skip_ai=False):
             logger.error("Falha ao autenticar. Abortando pipeline.")
             return
         
-        new_lessons = crawl_course(sync_mode=True)
+        new_lessons = crawl_course(sync_mode=True, course_id=course_id)
 
     if not new_lessons:
         logger.info("Nenhuma aula nova detectada. Verificando se existem JSONs locais pendentes de processamento...")
@@ -70,17 +72,33 @@ def run_full_pipeline(mock=False, limit=None, skip_ai=False):
     lessons_to_process = new_lessons[:max_lessons] if new_lessons else []
 
     extracted_count = 0
-    for lesson in lessons_to_process:
-        logger.info(f"Extraindo: {lesson['titulo']} do {lesson['modulo']}")
-        res = extract_lesson(
-            url=lesson["url"],
-            modulo_nome=lesson["modulo"],
-            aula_titulo=lesson["titulo"],
-            slug=lesson["slug"],
-            mock=mock
-        )
-        if res:
-            extracted_count += 1
+    if lessons_to_process:
+        workers_env = os.getenv("EXTRACTION_WORKERS", "4")
+        try:
+            workers = max(1, int(workers_env))
+        except ValueError:
+            logger.warning(f"EXTRACTION_WORKERS inválido: '{workers_env}'. Usando valor padrão 4.")
+            workers = 4
+
+        workers = min(workers, len(lessons_to_process))
+        logger.info(f"Iniciando extração paralela com {workers} worker(s)...")
+
+        def extract_one_lesson(lesson):
+            logger.info(f"Extraindo: {lesson['titulo']} do {lesson['modulo']}")
+            return extract_lesson(
+                url=lesson["url"],
+                modulo_nome=lesson["modulo"],
+                aula_titulo=lesson["titulo"],
+                slug=lesson["slug"],
+                mock=mock,
+                curso_nome=lesson.get("curso")
+            )
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(extract_one_lesson, lesson) for lesson in lessons_to_process]
+            for future in as_completed(futures):
+                if future.result():
+                    extracted_count += 1
 
     # 3. Processamento & Markdown
     # Varre a pasta data/raw para encontrar arquivos não processados
@@ -128,7 +146,9 @@ def main():
     subparsers.add_parser("login", help="Executa o login automático e salva a sessão")
     
     # Subcomando: sync
-    subparsers.add_parser("sync", help="Sincroniza o mapeamento de aulas do curso")
+    parser_sync = subparsers.add_parser("sync", help="Sincroniza o mapeamento de aulas do curso")
+    parser_sync.add_argument("--course-id", type=str, help="ID do curso na plataforma para sincronizar")
+    parser_sync.add_argument("--list-courses", action="store_true", help="Lista os cursos disponíveis na plataforma")
     
     # Subcomando: extract
     parser_extract = subparsers.add_parser("extract", help="Extrai o conteúdo de uma aula")
@@ -136,6 +156,7 @@ def main():
     parser_extract.add_argument("--modulo", type=str, help="Nome do módulo")
     parser_extract.add_argument("--aula", type=str, help="Título da aula")
     parser_extract.add_argument("--slug", type=str, help="Slug para o arquivo")
+    parser_extract.add_argument("--curso", type=str, help="Nome do curso para salvar no JSON da aula")
     parser_extract.add_argument("--mock", action="store_true", help="Gera dados simulados para teste")
 
     # Subcomando: process
@@ -150,6 +171,14 @@ def main():
     parser_md.add_argument("--all", action="store_true", help="Gera markdown para todas as aulas no cache")
     parser_md.add_argument("--skip-ai", action="store_true", help="Gera notas sem o conteúdo de IA (apenas resumo e transcrição)")
 
+    # Subcomando: attachments-enrich
+    parser_att = subparsers.add_parser("attachments-enrich", help="Enriquece materiais de apoio (Notion/GitHub)")
+    parser_att.add_argument("--file", type=str, help="Arquivo JSON bruto da aula")
+    parser_att.add_argument("--all", action="store_true", help="Enriquece materiais de todas as aulas do cache bruto")
+    parser_att.add_argument("--no-ai", action="store_true", help="Desativa sumarização por IA no enriquecimento")
+    parser_att.add_argument("--force", action="store_true", help="Força reprocessamento de materiais já enriquecidos")
+    parser_att.add_argument("--limit", type=int, help="Limite de aulas para processar com --all")
+
     # Subcomando: index
     subparsers.add_parser("index", help="Reconstrói os índices de módulos e geral no Obsidian")
 
@@ -158,6 +187,7 @@ def main():
     parser_pipe.add_argument("--mock", action="store_true", help="Usa dados simulados para teste (sem requisições reais à plataforma)")
     parser_pipe.add_argument("--limit", type=int, help="Limite de aulas a serem processadas nesta execução")
     parser_pipe.add_argument("--skip-ai", action="store_true", help="Pula a etapa de enriquecimento de IA, gerando notas apenas com resumo e transcrição")
+    parser_pipe.add_argument("--course-id", type=str, help="ID do curso na plataforma para sincronizar no pipeline")
 
     args = parser.parse_args()
 
@@ -169,12 +199,21 @@ def main():
         if not login():
             logger.error("Não foi possível autenticar para realizar o Sync.")
             sys.exit(1)
-        crawl_course(sync_mode=True)
+        if args.list_courses:
+            courses = crawl_course(sync_mode=False, list_courses=True)
+            if not courses:
+                logger.error("Nenhum curso encontrado para listagem.")
+                sys.exit(1)
+            print("\nCursos disponíveis:")
+            for course in courses:
+                print(f"- ID {course['id']}: {course['name']}")
+        else:
+            crawl_course(sync_mode=True, course_id=args.course_id)
         
     elif args.command == "extract":
         if not args.mock and not args.url:
             parser_extract.error("A --url é obrigatória caso --mock não esteja ativo.")
-        extract_lesson(args.url, args.modulo, args.aula, args.slug, mock=args.mock)
+        extract_lesson(args.url, args.modulo, args.aula, args.slug, mock=args.mock, curso_nome=args.curso)
         
     elif args.command == "process":
         if args.file:
@@ -205,13 +244,25 @@ def main():
             logger.info(f"Concluído: {count} arquivos Markdown gerados no vault.")
         else:
             parser_md.print_help()
+
+    elif args.command == "attachments-enrich":
+        use_ai = not args.no_ai
+        if args.file:
+            success = enrich_attachments_for_file(Path(args.file), use_ai=use_ai, force=args.force)
+            sys.exit(0 if success else 1)
+        elif args.all:
+            success_count, total = enrich_attachments_for_all(use_ai=use_ai, force=args.force, limit=args.limit)
+            logger.info(f"Enriquecimento de materiais concluído: {success_count} de {total} aulas.")
+            sys.exit(0 if success_count == total else 1)
+        else:
+            parser_att.print_help()
             
     elif args.command == "index":
         success = generate_indexes()
         sys.exit(0 if success else 1)
         
     elif args.command == "pipeline":
-        run_full_pipeline(mock=args.mock, limit=args.limit, skip_ai=args.skip_ai)
+        run_full_pipeline(mock=args.mock, limit=args.limit, skip_ai=args.skip_ai, course_id=args.course_id)
         
     else:
         parser.print_help()

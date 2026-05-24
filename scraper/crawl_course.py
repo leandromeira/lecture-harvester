@@ -30,6 +30,36 @@ def clean_slug(text):
     text = re.sub(r'[\s_]+', '-', text)
     return text.strip('-')
 
+def extract_course_id(url):
+    """Extrai o ID/slug do curso a partir da URL /courses/<id-ou-slug>."""
+    match = re.search(r"/courses/([^/?#]+)", url or "")
+    return match.group(1) if match else None
+
+def list_available_courses(page):
+    """Lista cursos visíveis na tela inicial de cursos."""
+    courses = []
+    seen_ids = set()
+    links = page.query_selector_all("a")
+
+    for link in links:
+        try:
+            text = page.evaluate("(el) => el.innerText", link).strip()
+            href = page.evaluate("(el) => el.href", link)
+            if not href or "/courses/" not in href or "/catalog/" in href:
+                continue
+
+            course_id = extract_course_id(href)
+            if not course_id or course_id in seen_ids:
+                continue
+
+            name = text.split("\n")[0].strip() if text else course_id
+            courses.append({"id": course_id, "name": name, "url": href})
+            seen_ids.add(course_id)
+        except Exception:
+            continue
+
+    return courses
+
 def load_existing_index():
     """Carrega o índice atual se ele já existir."""
     if INDEX_PATH.exists():
@@ -40,7 +70,7 @@ def load_existing_index():
             logger.error(f"Erro ao carregar índice existente: {e}")
     return {"curso": os.getenv("COURSE_NAME", "MBA em Engenharia de Software com IA"), "modulos": []}
 
-def crawl_course(sync_mode=True):
+def crawl_course(sync_mode=True, course_id=None, list_courses=False):
     """
     Varre a página do curso na Full Cycle, encontra os módulos e suas respectivas aulas.
     Se sync_mode=True, mescla as aulas encontradas sem apagar o histórico,
@@ -48,9 +78,6 @@ def crawl_course(sync_mode=True):
     """
     platform_url = os.getenv("PLATFORM_URL")
     target_course_name = os.getenv("COURSE_NAME")
-    if not target_course_name:
-        logger.error("A variável de ambiente 'COURSE_NAME' não está definida no arquivo .env!")
-        raise ValueError("A variável de ambiente 'COURSE_NAME' não está definida no arquivo .env!")
 
     ignore_modules_str = os.getenv("IGNORE_MODULES", "")
     ignore_modules = [m.strip().strip('"').strip("'").lower() for m in ignore_modules_str.split(",") if m.strip()]
@@ -84,66 +111,50 @@ def crawl_course(sync_mode=True):
             page.wait_for_timeout(3000)
             logger.info(f"Página carregada. URL atual: {page.url} | Título: {page.title()}")
 
-            # 2. Encontrar a URL do curso configurado
-            logger.info(f"Procurando curso correspondente a: '{target_course_name}'")
-            
-            links = page.query_selector_all("a")
-            course_url = None
-            course_full_name = None
-            
-            # 1. Tentar encontrar links diretos de curso (sem "/catalog/")
-            for link in links:
-                try:
-                    text = page.evaluate("(el) => el.innerText", link).strip()
-                    href = page.evaluate("(el) => el.href", link)
-                    
-                    if href and "/courses/" in href and "/catalog/" not in href:
-                        if target_course_name.lower() in text.lower() or (
-                            "mba" in target_course_name.lower() and "ia" in target_course_name.lower() and
-                            "mba" in text.lower() and "ia" in text.lower()
-                        ):
-                            course_url = href
-                            course_full_name = text.split("\n")[0]
-                            break
-                except Exception:
-                    continue
-                    
-            # 2. Tentar encontrar qualquer link de curso ou catálogo se não achou direto
-            if not course_url:
-                for link in links:
-                    try:
-                        text = page.evaluate("(el) => el.innerText", link).strip()
-                        href = page.evaluate("(el) => el.href", link)
-                        
-                        if href and ("/courses/" in href or "/catalog/" in href):
-                            if target_course_name.lower() in text.lower() or (
-                                "mba" in target_course_name.lower() and "ia" in target_course_name.lower() and
-                                "mba" in text.lower() and "ia" in text.lower()
-                            ):
-                                course_url = href
-                                course_full_name = text.split("\n")[0]
-                                break
-                    except Exception:
-                        continue
-                        
-            # 3. Fallback: Pegar o primeiro link de curso se nada acima bater
-            if not course_url:
-                logger.warning(f"Não encontramos curso com o nome '{target_course_name}'. Tentando pegar o primeiro curso disponível...")
-                for link in links:
-                    try:
-                        href = page.evaluate("(el) => el.href", link)
-                        if href and "/courses/" in href and "/catalog/" not in href:
-                            text = page.evaluate("(el) => el.innerText", link).strip()
-                            course_url = href
-                            course_full_name = text.split("\n")[0] if text else "Curso Detectado"
-                            break
-                    except Exception:
-                        continue
-                        
-            if not course_url:
+            # 2. Encontrar cursos e selecionar dinamicamente
+            available_courses = list_available_courses(page)
+            if list_courses:
+                logger.info(f"Cursos encontrados: {len(available_courses)}")
+                return available_courses
+
+            if not available_courses:
                 logger.error("Nenhum curso encontrado na plataforma!")
                 return []
 
+            selected_course = None
+            normalized_course_id = str(course_id).strip() if course_id is not None else None
+            if course_id:
+                selected_course = next((c for c in available_courses if c["id"] == normalized_course_id), None)
+                if not selected_course and normalized_course_id:
+                    selected_course = next(
+                        (c for c in available_courses if normalized_course_id in c["url"]),
+                        None
+                    )
+                if not selected_course:
+                    logger.error(f"Curso com ID '{course_id}' não encontrado.")
+                    return []
+            elif target_course_name:
+                target_name_lower = target_course_name.lower()
+                selected_course = next(
+                    (c for c in available_courses if target_name_lower in c["name"].lower()),
+                    None
+                )
+                if not selected_course and "mba" in target_name_lower and "ia" in target_name_lower:
+                    selected_course = next(
+                        (c for c in available_courses if "mba" in c["name"].lower() and "ia" in c["name"].lower()),
+                        None
+                    )
+
+            if not selected_course:
+                selected_course = available_courses[0]
+                if target_course_name:
+                    logger.warning(
+                        f"Curso '{target_course_name}' não encontrado. Usando primeiro disponível: {selected_course['name']}"
+                    )
+
+            course_url = selected_course["url"]
+            course_full_name = selected_course["name"]
+            os.environ["COURSE_NAME"] = course_full_name
             logger.info(f"Curso selecionado: '{course_full_name}' -> URL: {course_url}")
 
             # 3. Navegar para a página do curso e extrair os módulos
@@ -265,6 +276,7 @@ def crawl_course(sync_mode=True):
                             
                             if lesson_url not in existing_urls:
                                 new_lessons_found.append({
+                                    "curso": course_full_name or target_course_name or "Curso",
                                     "modulo": m_title,
                                     **aula_data
                                 })
@@ -325,8 +337,15 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Varredura de aulas da plataforma Full Cycle.")
     parser.add_argument("--no-sync", action="store_true", help="Sobrescrever o índice existente em vez de mesclar incrementalmente.")
+    parser.add_argument("--course-id", type=str, help="ID do curso para sincronizar.")
+    parser.add_argument("--list-courses", action="store_true", help="Lista cursos disponíveis e encerra.")
     args = parser.parse_args()
-    
-    new_lessons = crawl_course(sync_mode=not args.no_sync)
-    if new_lessons:
-        print(f"Novas aulas encontradas para download:\n{json.dumps(new_lessons, indent=2)}")
+
+    result = crawl_course(sync_mode=not args.no_sync, course_id=args.course_id, list_courses=args.list_courses)
+    if result:
+        if args.list_courses:
+            print("Cursos disponíveis:")
+            for course in result:
+                print(f"- ID {course['id']}: {course['name']}")
+        else:
+            print(f"Novas aulas encontradas para download:\n{json.dumps(result, indent=2)}")

@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import re
+import shutil
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -18,11 +19,50 @@ def clean_filename(name):
     """Remove caracteres inválidos para nomes de arquivos e diretórios."""
     return re.sub(r'[\\/*?:"<>|]', '', name).strip()
 
+def build_materials_markdown(raw_data: dict) -> str:
+    """Monta seção de materiais de apoio com links locais e remotos."""
+    materiais = raw_data.get("materiais_apoio", [])
+    if not materiais:
+        return "*Nenhum material de apoio detectado.*\n"
+
+    lines = []
+    for material in materiais:
+        titulo = material.get("titulo", "Material de Apoio")
+        url = material.get("url", "")
+        local_path = material.get("arquivo_local")
+        downloaded = material.get("baixado", False)
+        material_type = material.get("tipo")
+        artifact_paths = material.get("artefatos_locais", [])
+        enrichment = material.get("enriquecimento", {})
+
+        if local_path and downloaded:
+            filename = Path(local_path).name
+            line = f"- [[attachments/{filename}|{titulo}]]"
+        elif url:
+            line = f"- [{titulo}]({url})"
+        else:
+            line = f"- {titulo}"
+
+        if material_type:
+            line += f" _(tipo: {material_type})_"
+        lines.append(line)
+
+        for artifact in artifact_paths:
+            artifact_name = Path(artifact).name
+            lines.append(f"  - Artefato: [[attachments/{artifact_name}|{artifact_name}]]")
+
+        resumo = enrichment.get("resumo")
+        if resumo:
+            lines.append(f"  - Resumo: {resumo}")
+
+    return "\n".join(lines) + "\n"
+
 def build_markdown_content(raw_data: dict, processed_data: dict = None) -> str:
     """Monta a estrutura de markdown para o Obsidian conforme o template."""
     aula_titulo = raw_data.get("aula", "Sem Título")
     resumo_original = raw_data.get("resumo_original", "Sem resumo na plataforma.")
     transcricao = raw_data.get("transcricao", "")
+    materiais_md = build_materials_markdown(raw_data)
     
     # Extração de metadados para o YAML Frontmatter
     curso = raw_data.get("curso", "MBA em Engenharia de Software com IA")
@@ -68,6 +108,9 @@ tags:
 
 # Transcrição completa da aula
 {transcricao}
+
+## Materiais de Apoio
+{materiais_md}
 """
         return md
 
@@ -151,8 +194,38 @@ tags:
 
 # Transcrição completa da aula
 {transcricao}
+
+## Materiais de Apoio
+{materiais_md}
 """
     return md
+
+def sync_attachments_to_obsidian(raw_data: dict, obsidian_dir: Path):
+    """Copia anexos baixados para a pasta attachments da aula no Obsidian."""
+    materiais = raw_data.get("materiais_apoio", [])
+    if not materiais:
+        return
+
+    attachments_dir = obsidian_dir / "attachments"
+    attachments_dir.mkdir(parents=True, exist_ok=True)
+    project_root = Path(__file__).resolve().parents[1]
+
+    for material in materiais:
+        local_path = material.get("arquivo_local")
+        if not local_path:
+            local_candidates = []
+        else:
+            local_candidates = [local_path]
+        for artifact in material.get("artefatos_locais", []):
+            local_candidates.append(artifact)
+
+        for candidate in local_candidates:
+            source_path = project_root / candidate
+            if not source_path.exists():
+                continue
+            target_path = attachments_dir / source_path.name
+            if not target_path.exists():
+                shutil.copy2(source_path, target_path)
 
 def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = None, skip_ai=False) -> Path:
     """
@@ -189,7 +262,7 @@ def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = 
     # Definir caminhos no Obsidian
     vault_path_str = os.getenv("OBSIDIAN_VAULT_PATH", "/Users/leandromeira/Obsidian")
     vault_path = Path(vault_path_str)
-    course_name = os.getenv("COURSE_NAME", "MBA em Engenharia de Software com IA")
+    course_name = raw_data.get("curso") or os.getenv("COURSE_NAME", "MBA em Engenharia de Software com IA")
     
     modulo_original = raw_data.get("modulo", "Geral")
     # Limpa nomes para pasta
@@ -212,6 +285,8 @@ def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = 
         # Salva o arquivo no vault do Obsidian
         with open(obsidian_file_path, "w", encoding="utf-8") as f:
             f.write(markdown_content)
+
+        sync_attachments_to_obsidian(raw_data, obsidian_dir)
         
         # Salva também um cache local de Markdown para segurança
         local_md_dir = Path(__file__).resolve().parents[1] / "data" / "markdown" / modulo_clean

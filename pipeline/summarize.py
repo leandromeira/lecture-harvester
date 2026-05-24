@@ -4,6 +4,8 @@ import json
 import re
 import time
 import random
+import argparse
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -11,6 +13,7 @@ load_dotenv()
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from pipeline.logging_setup import setup_processing_logger
 from pipeline.clean_transcript import clean_transcript
+from pipeline.cost_tracker import log_cost_event
 
 logger = setup_processing_logger()
 
@@ -66,7 +69,7 @@ def get_ai_client(provider: str):
     else:
         raise ValueError(f"Provedor '{provider}' não suportado.")
 
-def call_ai(provider: str, model: str, prompt: str, client, temperature: float = 0.2) -> str:
+def call_ai(provider: str, model: str, prompt: str, client, temperature: float = 0.2, call_context: str = "unknown") -> str:
     """Faz a chamada da API do provedor selecionado de forma direta usando o SDK, com retry automático e backoff exponencial."""
     max_retries = 5
     base_delay = 2.0
@@ -85,6 +88,7 @@ def call_ai(provider: str, model: str, prompt: str, client, temperature: float =
                     ],
                     temperature=temperature
                 )
+                log_cost_event(provider, model, call_context, response=response, status="success")
                 return response.choices[0].message.content
                 
             elif provider == "anthropic":
@@ -97,6 +101,7 @@ def call_ai(provider: str, model: str, prompt: str, client, temperature: float =
                         {"role": "user", "content": prompt}
                     ]
                 )
+                log_cost_event(provider, model, call_context, response=response, status="success")
                 return response.content[0].text
                 
             elif provider == "gemini":
@@ -110,11 +115,13 @@ def call_ai(provider: str, model: str, prompt: str, client, temperature: float =
                     contents=prompt,
                     config=config
                 )
+                log_cost_event(provider, model, call_context, response=response, status="success")
                 return response.text
                 
         except Exception as e:
             error_msg = str(e).lower()
             is_rate_limit = "rate limit" in error_msg or "429" in error_msg or "too many requests" in error_msg
+            log_cost_event(provider, model, call_context, response=None, status="error", error_message=str(e))
             
             if attempt == max_retries:
                 logger.error(f"Falha definitiva após {max_retries} tentativas na chamada de IA: {e}")
@@ -184,10 +191,10 @@ def process_lesson_ai(raw_json_path: Path, force=False) -> bool:
         logger.error(f"Erro ao ler arquivos de prompt em '{PROMPTS_DIR}': {e}")
         return False
 
-    # Configura o cliente de IA
+    # Configura parâmetros de IA
     provider = os.getenv("AI_PROVIDER", "openai")
     model = os.getenv("AI_MODEL", "gpt-4o")
-    
+
     # Carrega temperatura
     temp_str = os.getenv("AI_TEMPERATURE")
     try:
@@ -195,12 +202,6 @@ def process_lesson_ai(raw_json_path: Path, force=False) -> bool:
     except ValueError:
         logger.warning(f"Temperatura inválida no env: '{temp_str}'. Usando valor padrão 0.2.")
         temperature = 0.2
-    
-    try:
-        client = get_ai_client(provider)
-    except Exception as e:
-        logger.error(f"Erro ao inicializar cliente de IA: {e}")
-        return False
 
     # Dados comuns para formatação dos prompts
     context = {
@@ -211,25 +212,34 @@ def process_lesson_ai(raw_json_path: Path, force=False) -> bool:
         "transcricao": cleaned
     }
 
-    # Executar as 3 chamadas e converter em JSON
+    # Executar as 3 chamadas em paralelo e converter em JSON
     try:
-        # 1. Resumo e Relações
-        logger.info("Executando prompt de Resumo...")
         p_sum = format_prompt(prompt_sum_tmpl, context)
-        res_sum_txt = call_ai(provider, model, p_sum, client, temperature=temperature)
-        res_sum = extract_json_block(res_sum_txt)
-
-        # 2. Conceitos e Exemplos
-        logger.info("Executando prompt de Conceitos...")
         p_con = format_prompt(prompt_con_tmpl, context)
-        res_con_txt = call_ai(provider, model, p_con, client, temperature=temperature)
-        res_con = extract_json_block(res_con_txt)
-
-        # 3. Flashcards e Revisão
-        logger.info("Executando prompt de Flashcards...")
         p_fla = format_prompt(prompt_fla_tmpl, context)
-        res_fla_txt = call_ai(provider, model, p_fla, client, temperature=temperature)
-        res_fla = extract_json_block(res_fla_txt)
+
+        def run_prompt(prompt_name: str, prompt_text: str) -> dict:
+            logger.info(f"Executando prompt de {prompt_name}...")
+            client = get_ai_client(provider)
+            response_text = call_ai(
+                provider,
+                model,
+                prompt_text,
+                client,
+                temperature=temperature,
+                call_context=f"summarize:{prompt_name.lower()}"
+            )
+            return extract_json_block(response_text)
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                "sum": executor.submit(run_prompt, "Resumo", p_sum),
+                "con": executor.submit(run_prompt, "Conceitos", p_con),
+                "fla": executor.submit(run_prompt, "Flashcards", p_fla),
+            }
+            res_sum = futures["sum"].result()
+            res_con = futures["con"].result()
+            res_fla = futures["fla"].result()
 
     except Exception as e:
         logger.exception(f"Erro nas chamadas de API de IA: {e}")
