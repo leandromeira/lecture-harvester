@@ -24,9 +24,41 @@ def build_markdown_content(raw_data: dict, processed_data: dict = None) -> str:
     resumo_original = raw_data.get("resumo_original", "Sem resumo na plataforma.")
     transcricao = raw_data.get("transcricao", "")
     
+    # Extração de metadados para o YAML Frontmatter
+    curso = raw_data.get("curso", "MBA em Engenharia de Software com IA")
+    modulo = raw_data.get("modulo", "Geral")
+    url = raw_data.get("url", "")
+    
+    # Escapar aspas duplas para evitar quebrar o YAML
+    curso_clean = curso.replace('"', '\\"')
+    modulo_clean = modulo.replace('"', '\\"')
+    aula_clean = aula_titulo.replace('"', '\\"')
+    url_clean = url.replace('"', '\\"')
+    
+    # Mapeamento de tags para a lista do frontmatter
+    if processed_data:
+        tags_list = processed_data.get("tags", [])
+    else:
+        tags_list = ["sem-ia"]
+        
+    tags_yaml = "\n".join([f"  - {t}" for t in tags_list])
+    if not tags_yaml:
+        tags_yaml = "  - aula"
+        
+    frontmatter = f"""---
+curso: "{curso_clean}"
+modulo: "{modulo_clean}"
+aula: "{aula_clean}"
+url: "{url_clean}"
+tags:
+{tags_yaml}
+---
+
+"""
+
     # Se não houver dados enriquecidos por IA (Fase 2)
     if not processed_data:
-        md = f"""# Aula — {aula_titulo}
+        md = f"""{frontmatter}# Aula — {aula_titulo}
 
 > [!NOTE]
 > Nota gerada em modo simples (sem enriquecimento de IA).
@@ -87,11 +119,11 @@ def build_markdown_content(raw_data: dict, processed_data: dict = None) -> str:
         relacoes_md = "- *Sem relações mapeadas.*\n"
 
     # Formatação das tags
-    tags_list = [f"#{t}" for t in processed_data.get("tags", [])]
-    tags_md = " ".join(tags_list) if tags_list else "#aula"
+    tags_list_body = [f"#{t}" for t in processed_data.get("tags", [])]
+    tags_md = " ".join(tags_list_body) if tags_list_body else "#aula"
 
     # Monta a string final baseada exatamente no template do usuário
-    md = f"""# Aula — {aula_titulo}
+    md = f"""{frontmatter}# Aula — {aula_titulo}
 
 ## Resumo Executivo
 {processed_data.get("resumo_executivo", "Resumo não disponível.")}
