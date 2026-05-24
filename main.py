@@ -1,0 +1,218 @@
+import os
+import sys
+import argparse
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Carregar ambiente
+load_dotenv()
+sys.path.append(str(Path(__file__).resolve()))
+
+from pipeline.logging_setup import setup_processing_logger
+from scraper.login import login
+from scraper.crawl_course import crawl_course
+from scraper.extract_lesson import extract_lesson
+from pipeline.summarize import process_lesson_ai
+from pipeline.generate_markdown import generate_obsidian_markdown
+from pipeline.generate_module_index import generate_indexes
+
+logger = setup_processing_logger()
+
+# Configurações carregadas via variáveis de ambiente (.env)
+
+RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
+PROCESSED_DIR = Path(__file__).resolve().parent / "data" / "processed"
+
+def run_full_pipeline(mock=False, limit=None):
+    """
+    Executa o fluxo completo do pipeline (ETL):
+    1. Sincroniza o índice do curso (sync).
+    2. Extrai as aulas pendentes (extract) respeitando o limite máximo definido.
+    3. Enriquece com IA (process).
+    4. Gera os Markdowns para Obsidian (markdown).
+    5. Atualiza os índices do Obsidian (index).
+    """
+    logger.info(f"=== Iniciando Pipeline Completo (Mock={mock}) ===")
+    
+    # 1. Sync
+    if mock:
+        logger.info("[MOCK] Ignorando sincronização com a plataforma real.")
+        # Criar dados estruturados falsos no índice se não existir
+        new_lessons = [
+            {
+                "modulo": "Módulo 01 - Engenharia de Prompt",
+                "titulo": "Aula 03 - Context Window",
+                "slug": "aula-03-context-window",
+                "url": "https://plataforma.exemplo.com/aulas/context-window"
+            },
+            {
+                "modulo": "Módulo 01 - Engenharia de Prompt",
+                "titulo": "Aula 04 - System Prompts",
+                "slug": "aula-04-system-prompts",
+                "url": "https://plataforma.exemplo.com/aulas/system-prompts"
+            }
+        ]
+    else:
+        # Tenta login automático antes de iniciar o crawl
+        if not login():
+            logger.error("Falha ao autenticar. Abortando pipeline.")
+            return
+        
+        new_lessons = crawl_course(sync_mode=True)
+
+    if not new_lessons:
+        logger.info("Nenhuma aula nova detectada. Verificando se existem JSONs locais pendentes de processamento...")
+    else:
+        logger.info(f"Detectadas {len(new_lessons)} novas aulas para extração.")
+
+    # 2. Extração
+    max_lessons = limit or int(os.getenv("MAX_LESSONS_PER_RUN", 10))
+    lessons_to_process = new_lessons[:max_lessons] if new_lessons else []
+
+    extracted_count = 0
+    for lesson in lessons_to_process:
+        logger.info(f"Extraindo: {lesson['titulo']} do {lesson['modulo']}")
+        res = extract_lesson(
+            url=lesson["url"],
+            modulo_nome=lesson["modulo"],
+            aula_titulo=lesson["titulo"],
+            slug=lesson["slug"],
+            mock=mock
+        )
+        if res:
+            extracted_count += 1
+
+    # 3. Processamento & Markdown
+    # Varre a pasta data/raw para encontrar arquivos não processados
+    logger.info("Varrendo arquivos locais para processamento de IA e Markdown...")
+    raw_files = list(RAW_DIR.glob("**/*.json"))
+    # Ignora o arquivo do índice
+    raw_files = [rf for rf in raw_files if rf.name != "course_index.json"]
+
+    processed_count = 0
+    markdown_count = 0
+
+    for rf in raw_files:
+        # Caminho relativo para manter a estrutura de subpastas
+        rel_path = rf.relative_to(RAW_DIR)
+        pf = PROCESSED_DIR / rel_path
+
+        # Roda IA se o arquivo processado não existir ou se estivermos em modo mock de teste
+        if not pf.exists():
+            success = process_lesson_ai(rf)
+            if success:
+                processed_count += 1
+        
+        # Gera o markdown para o Obsidian
+        md_file = generate_obsidian_markdown(rf)
+        if md_file:
+            markdown_count += 1
+
+    # 4. Geração dos Índices
+    generate_indexes()
+
+    logger.info("=== Pipeline concluído com sucesso! ===")
+    logger.info(f"Aulas extraídas: {extracted_count}")
+    logger.info(f"Aulas enriquecidas por IA: {processed_count}")
+    logger.info(f"Notas Markdown criadas/atualizadas: {markdown_count}")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Lecture Harvester - Pipeline de Extração e Organização de Aulas para Obsidian",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    subparsers = parser.add_subparsers(dest="command", help="Comando para executar")
+    
+    # Subcomando: login
+    subparsers.add_parser("login", help="Executa o login automático e salva a sessão")
+    
+    # Subcomando: sync
+    subparsers.add_parser("sync", help="Sincroniza o mapeamento de aulas do curso")
+    
+    # Subcomando: extract
+    parser_extract = subparsers.add_parser("extract", help="Extrai o conteúdo de uma aula")
+    parser_extract.add_argument("--url", type=str, help="URL da aula")
+    parser_extract.add_argument("--modulo", type=str, help="Nome do módulo")
+    parser_extract.add_argument("--aula", type=str, help="Título da aula")
+    parser_extract.add_argument("--slug", type=str, help="Slug para o arquivo")
+    parser_extract.add_argument("--mock", action="store_true", help="Gera dados simulados para teste")
+
+    # Subcomando: process
+    parser_process = subparsers.add_parser("process", help="Enriquece aulas extraídas utilizando IA")
+    parser_process.add_argument("--file", type=str, help="Caminho do arquivo JSON bruto")
+    parser_process.add_argument("--all", action="store_true", help="Processa todas as aulas brancas pendentes")
+    parser_process.add_argument("--force", action="store_true", help="Força reprocessamento de IA")
+
+    # Subcomando: markdown
+    parser_md = subparsers.add_parser("markdown", help="Gera arquivos markdown para o Obsidian")
+    parser_md.add_argument("--file", type=str, help="Caminho do arquivo JSON bruto")
+    parser_md.add_argument("--all", action="store_true", help="Gera markdown para todas as aulas no cache")
+
+    # Subcomando: index
+    subparsers.add_parser("index", help="Reconstrói os índices de módulos e geral no Obsidian")
+
+    # Subcomando: pipeline (Orquestração completa)
+    parser_pipe = subparsers.add_parser("pipeline", help="Executa todo o pipeline (Sync -> Extract -> Process -> MD -> Index)")
+    parser_pipe.add_argument("--mock", action="store_true", help="Usa dados simulados para teste (sem requisições reais à plataforma)")
+    parser_pipe.add_argument("--limit", type=int, help="Limite de aulas a serem processadas nesta execução")
+
+    args = parser.parse_args()
+
+    if args.command == "login":
+        success = login(force=True)
+        sys.exit(0 if success else 1)
+        
+    elif args.command == "sync":
+        if not login():
+            logger.error("Não foi possível autenticar para realizar o Sync.")
+            sys.exit(1)
+        crawl_course(sync_mode=True)
+        
+    elif args.command == "extract":
+        if not args.mock and not args.url:
+            parser_extract.error("A --url é obrigatória caso --mock não esteja ativo.")
+        extract_lesson(args.url, args.modulo, args.aula, args.slug, mock=args.mock)
+        
+    elif args.command == "process":
+        if args.file:
+            success = process_lesson_ai(Path(args.file), force=args.force)
+            sys.exit(0 if success else 1)
+        elif args.all:
+            raw_files = list(RAW_DIR.glob("**/*.json"))
+            raw_files = [rf for rf in raw_files if rf.name != "course_index.json"]
+            success_count = 0
+            for rf in raw_files:
+                if process_lesson_ai(rf, force=args.force):
+                    success_count += 1
+            logger.info(f"Concluído: {success_count} de {len(raw_files)} arquivos processados.")
+        else:
+            parser_process.print_help()
+            
+    elif args.command == "markdown":
+        if args.file:
+            md_file = generate_obsidian_markdown(Path(args.file))
+            sys.exit(0 if md_file else 1)
+        elif args.all:
+            raw_files = list(RAW_DIR.glob("**/*.json"))
+            raw_files = [rf for rf in raw_files if rf.name != "course_index.json"]
+            count = 0
+            for rf in raw_files:
+                if generate_obsidian_markdown(rf):
+                    count += 1
+            logger.info(f"Concluído: {count} arquivos Markdown gerados no vault.")
+        else:
+            parser_md.print_help()
+            
+    elif args.command == "index":
+        success = generate_indexes()
+        sys.exit(0 if success else 1)
+        
+    elif args.command == "pipeline":
+        run_full_pipeline(mock=args.mock, limit=args.limit)
+        
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
