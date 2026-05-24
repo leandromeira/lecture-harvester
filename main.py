@@ -23,7 +23,7 @@ logger = setup_processing_logger()
 RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parent / "data" / "processed"
 
-def run_full_pipeline(mock=False, limit=None):
+def run_full_pipeline(mock=False, limit=None, skip_ai=False):
     """
     Executa o fluxo completo do pipeline (ETL):
     1. Sincroniza o índice do curso (sync).
@@ -97,14 +97,14 @@ def run_full_pipeline(mock=False, limit=None):
         rel_path = rf.relative_to(RAW_DIR)
         pf = PROCESSED_DIR / rel_path
 
-        # Roda IA se o arquivo processado não existir ou se estivermos em modo mock de teste
-        if not pf.exists():
+        # Roda IA se não pulamos a etapa de IA e o arquivo processado não existir
+        if not skip_ai and not pf.exists():
             success = process_lesson_ai(rf)
             if success:
                 processed_count += 1
         
         # Gera o markdown para o Obsidian
-        md_file = generate_obsidian_markdown(rf)
+        md_file = generate_obsidian_markdown(rf, skip_ai=skip_ai)
         if md_file:
             markdown_count += 1
 
@@ -148,6 +148,7 @@ def main():
     parser_md = subparsers.add_parser("markdown", help="Gera arquivos markdown para o Obsidian")
     parser_md.add_argument("--file", type=str, help="Caminho do arquivo JSON bruto")
     parser_md.add_argument("--all", action="store_true", help="Gera markdown para todas as aulas no cache")
+    parser_md.add_argument("--skip-ai", action="store_true", help="Gera notas sem o conteúdo de IA (apenas resumo e transcrição)")
 
     # Subcomando: index
     subparsers.add_parser("index", help="Reconstrói os índices de módulos e geral no Obsidian")
@@ -156,6 +157,7 @@ def main():
     parser_pipe = subparsers.add_parser("pipeline", help="Executa todo o pipeline (Sync -> Extract -> Process -> MD -> Index)")
     parser_pipe.add_argument("--mock", action="store_true", help="Usa dados simulados para teste (sem requisições reais à plataforma)")
     parser_pipe.add_argument("--limit", type=int, help="Limite de aulas a serem processadas nesta execução")
+    parser_pipe.add_argument("--skip-ai", action="store_true", help="Pula a etapa de enriquecimento de IA, gerando notas apenas com resumo e transcrição")
 
     args = parser.parse_args()
 
@@ -191,14 +193,14 @@ def main():
             
     elif args.command == "markdown":
         if args.file:
-            md_file = generate_obsidian_markdown(Path(args.file))
+            md_file = generate_obsidian_markdown(Path(args.file), skip_ai=args.skip_ai)
             sys.exit(0 if md_file else 1)
         elif args.all:
             raw_files = list(RAW_DIR.glob("**/*.json"))
             raw_files = [rf for rf in raw_files if rf.name != "course_index.json"]
             count = 0
             for rf in raw_files:
-                if generate_obsidian_markdown(rf):
+                if generate_obsidian_markdown(rf, skip_ai=args.skip_ai):
                     count += 1
             logger.info(f"Concluído: {count} arquivos Markdown gerados no vault.")
         else:
@@ -209,7 +211,7 @@ def main():
         sys.exit(0 if success else 1)
         
     elif args.command == "pipeline":
-        run_full_pipeline(mock=args.mock, limit=args.limit)
+        run_full_pipeline(mock=args.mock, limit=args.limit, skip_ai=args.skip_ai)
         
     else:
         parser.print_help()

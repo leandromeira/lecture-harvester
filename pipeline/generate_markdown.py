@@ -122,9 +122,9 @@ def build_markdown_content(raw_data: dict, processed_data: dict = None) -> str:
 """
     return md
 
-def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = None) -> Path:
+def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = None, skip_ai=False) -> Path:
     """
-    Lê o JSON bruto (e o JSON processado de IA se existir) e gera o arquivo
+    Lê o JSON bruto (e o JSON processado de IA se não for skip_ai e existir) e gera o arquivo
     Markdown dentro do Vault do Obsidian definido nas configurações.
     """
     if not raw_json_path.exists():
@@ -135,23 +135,24 @@ def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = 
     with open(raw_json_path, "r", encoding="utf-8") as f:
         raw_data = json.load(f)
 
-    # Tenta carregar dados processados pela IA se o caminho for informado ou se existir na pasta correspondente
+    # Tenta carregar dados processados pela IA se não ignorarmos a IA e o arquivo existir
     processed_data = None
-    if processed_json_path and processed_json_path.exists():
-        try:
-            with open(processed_json_path, "r", encoding="utf-8") as f:
-                processed_data = json.load(f)
-        except Exception as e:
-            logger.error(f"Erro ao carregar JSON processado da IA: {e}")
-    else:
-        # Se não passado explicitamente, tenta localizar no caminho padrão
-        default_processed_path = Path(__file__).resolve().parents[1] / "data" / "processed" / raw_json_path.relative_to(raw_json_path.parents[1])
-        if default_processed_path.exists():
+    if not skip_ai:
+        if processed_json_path and processed_json_path.exists():
             try:
-                with open(default_processed_path, "r", encoding="utf-8") as f:
+                with open(processed_json_path, "r", encoding="utf-8") as f:
                     processed_data = json.load(f)
             except Exception as e:
-                logger.error(f"Erro ao carregar JSON processado da IA por padrão: {e}")
+                logger.error(f"Erro ao carregar JSON processado da IA: {e}")
+        else:
+            # Se não passado explicitamente, tenta localizar no caminho padrão
+            default_processed_path = Path(__file__).resolve().parents[1] / "data" / "processed" / raw_json_path.relative_to(raw_json_path.parents[1])
+            if default_processed_path.exists():
+                try:
+                    with open(default_processed_path, "r", encoding="utf-8") as f:
+                        processed_data = json.load(f)
+                except Exception as e:
+                    logger.error(f"Erro ao carregar JSON processado da IA por padrão: {e}")
 
     # Definir caminhos no Obsidian
     vault_path_str = os.getenv("OBSIDIAN_VAULT_PATH", "/Users/leandromeira/Obsidian")
