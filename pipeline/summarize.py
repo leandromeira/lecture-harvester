@@ -2,6 +2,8 @@ import os
 import sys
 import json
 import re
+import time
+import random
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -65,45 +67,69 @@ def get_ai_client(provider: str):
         raise ValueError(f"Provedor '{provider}' não suportado.")
 
 def call_ai(provider: str, model: str, prompt: str, client, temperature: float = 0.2) -> str:
-    """Faz a chamada da API do provedor selecionado de forma direta usando o SDK."""
-    logger.debug(f"Fazendo chamada de IA ({provider} - {model} com temperatura {temperature})...")
-    
-    if provider == "openai":
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "Você é um assistente especializado em formatação JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=temperature
-        )
-        return response.choices[0].message.content
-        
-    elif provider == "anthropic":
-        response = client.messages.create(
-            model=model,
-            max_tokens=4000,
-            temperature=temperature,
-            system="Você é um assistente especializado em formatação JSON.",
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return response.content[0].text
-        
-    elif provider == "gemini":
-        # Usando o SDK google-genai com configuração de temperatura
-        from google import genai
-        config = genai.types.GenerateContentConfig(
-            temperature=temperature
-        )
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=config
-        )
-        return response.text
-        
+    """Faz a chamada da API do provedor selecionado de forma direta usando o SDK, com retry automático e backoff exponencial."""
+    max_retries = 5
+    base_delay = 2.0
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.debug(f"Fazendo chamada de IA ({provider} - {model} com temperatura {temperature}), tentativa {attempt}/{max_retries}...")
+            
+            if provider == "openai":
+                response = client.chat.completions.create(
+                    model=model,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": "Você é um assistente especializado em formatação JSON. Sempre responda em formato JSON válido."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=temperature
+                )
+                return response.choices[0].message.content
+                
+            elif provider == "anthropic":
+                response = client.messages.create(
+                    model=model,
+                    max_tokens=4000,
+                    temperature=temperature,
+                    system="Você é um assistente especializado em formatação JSON.",
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                return response.content[0].text
+                
+            elif provider == "gemini":
+                # Usando o SDK google-genai com configuração de temperatura
+                from google import genai
+                config = genai.types.GenerateContentConfig(
+                    temperature=temperature
+                )
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=config
+                )
+                return response.text
+                
+        except Exception as e:
+            error_msg = str(e).lower()
+            is_rate_limit = "rate limit" in error_msg or "429" in error_msg or "too many requests" in error_msg
+            
+            if attempt == max_retries:
+                logger.error(f"Falha definitiva após {max_retries} tentativas na chamada de IA: {e}")
+                raise e
+            
+            # Calcular delay com backoff exponencial + jitter
+            delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0.1, 1.0)
+            
+            if is_rate_limit:
+                logger.warning(f"[Rate Limit] Limite de requisições atingido. Tentativa {attempt}/{max_retries} falhou. Retrying em {delay:.2f}s... Erro: {e}")
+            else:
+                logger.warning(f"[Erro de API] Tentativa {attempt}/{max_retries} falhou. Retrying em {delay:.2f}s... Erro: {e}")
+                
+            time.sleep(delay)
+            
     return ""
 
 def format_prompt(template: str, context: dict) -> str:
