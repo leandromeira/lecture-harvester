@@ -32,7 +32,7 @@ AI_TEMPERATURE=0.2
 ### 1. Autenticação e Login Inicial
 Para iniciar a sessão de forma segura e visual:
 ```bash
-venv/bin/python scraper/interactive_login.py
+venv/bin/python scraper/login.py
 ```
 Isso abrirá uma janela visível do navegador. Complete o login manualmente na plataforma. Assim que você entrar no painel de controle do aluno, o script detectará automaticamente o sucesso, salvará os cookies de sessão no arquivo `config/storage_state.json` e fechará o navegador.
 

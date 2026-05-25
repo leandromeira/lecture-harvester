@@ -25,14 +25,15 @@ logger = setup_processing_logger()
 RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parent / "data" / "processed"
 
-def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None):
+def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None, skip_enrich=False):
     """
     Executa o fluxo completo do pipeline (ETL):
     1. Sincroniza o índice do curso (sync).
     2. Extrai as aulas pendentes (extract) respeitando o limite máximo definido.
-    3. Enriquece com IA (process).
-    4. Gera os Markdowns para Obsidian (markdown).
-    5. Atualiza os índices do Obsidian (index).
+    3. Enriquece os materiais de apoio se não ignorado (enrich).
+    4. Enriquece com IA (process).
+    5. Gera os Markdowns para Obsidian (markdown).
+    6. Atualiza os índices do Obsidian (index).
     """
     logger.info(f"=== Iniciando Pipeline Completo (Mock={mock}) ===")
     
@@ -115,6 +116,10 @@ def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None):
         rel_path = rf.relative_to(RAW_DIR)
         pf = PROCESSED_DIR / rel_path
 
+        # 3. Enriquece os materiais de apoio se não ignorado (Notion/GitHub)
+        if not skip_enrich:
+            enrich_attachments_for_file(rf, use_ai=not skip_ai, force=False)
+
         # Roda IA se não pulamos a etapa de IA e o arquivo processado não existir
         if not skip_ai and not pf.exists():
             success = process_lesson_ai(rf)
@@ -187,6 +192,7 @@ def main():
     parser_pipe.add_argument("--mock", action="store_true", help="Usa dados simulados para teste (sem requisições reais à plataforma)")
     parser_pipe.add_argument("--limit", type=int, help="Limite de aulas a serem processadas nesta execução")
     parser_pipe.add_argument("--skip-ai", action="store_true", help="Pula a etapa de enriquecimento de IA, gerando notas apenas com resumo e transcrição")
+    parser_pipe.add_argument("--skip-enrich", action="store_true", help="Pula a etapa de enriquecimento de materiais de apoio (Notion/GitHub)")
     parser_pipe.add_argument("--course-id", type=str, help="ID do curso na plataforma para sincronizar no pipeline")
 
     args = parser.parse_args()
@@ -262,7 +268,13 @@ def main():
         sys.exit(0 if success else 1)
         
     elif args.command == "pipeline":
-        run_full_pipeline(mock=args.mock, limit=args.limit, skip_ai=args.skip_ai, course_id=args.course_id)
+        run_full_pipeline(
+            mock=args.mock,
+            limit=args.limit,
+            skip_ai=args.skip_ai,
+            course_id=args.course_id,
+            skip_enrich=args.skip_enrich
+        )
         
     else:
         parser.print_help()

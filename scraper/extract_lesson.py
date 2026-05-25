@@ -22,8 +22,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # Seletores para os elementos da aula no Full Cycle
 SELECTORS = {
     "lesson_title": "h1, .MuiBreadcrumbs-ol li:last-child",
-    "transcript_item": "span.css-1gie7yz",
-    "summary_item": ".css-rymwba p, .css-rymwba"
+    "transcript_item": "#panel-1 div > span:last-child",
+    "summary_item": ".MuiTypography-h5 p, .MuiTypography-h5 h2"
 }
 
 ATTACHMENT_EXTENSIONS = {
@@ -230,9 +230,15 @@ def extract_lesson(url, modulo_nome, aula_titulo, slug, mock=False, curso_nome=N
         page = context.new_page()
 
         try:
-            # Usar domcontentloaded e uma pequena espera para carregamento dos dados React
+            # Usar domcontentloaded e aguardar de forma inteligente o carregamento dos componentes React
             page.goto(url, timeout=int(os.getenv("PLAYWRIGHT_TIMEOUT", 30000)), wait_until="domcontentloaded")
-            page.wait_for_timeout(5000)
+            try:
+                page.wait_for_selector('button[role="tab"]', timeout=10000)
+                # Esperar o container de resumo aparecer na tela (se existir)
+                page.wait_for_selector('.MuiTypography-h5', timeout=5000)
+            except Exception:
+                # Fallback de tempo de segurança caso a rede esteja lenta ou a página não tenha resumo
+                page.wait_for_timeout(2000)
 
             # Priorizar o título recebido do índice (aula_titulo), caindo de volta para a extração do DOM
             extracted_title = (aula_titulo or "").strip()
@@ -247,23 +253,43 @@ def extract_lesson(url, modulo_nome, aula_titulo, slug, mock=False, curso_nome=N
                 txt = el.inner_text().strip()
                 if txt and txt not in resumo_texts:
                     resumo_texts.append(txt)
+
+            # Fallback robusto caso não encontre elementos p ou h2 específicos (.MuiTypography-h5)
+            if not resumo_texts:
+                fallback_elms = page.query_selector_all(".MuiTypography-h5")
+                for el in fallback_elms:
+                    txt = el.inner_text().strip()
+                    if txt and txt not in resumo_texts:
+                        resumo_texts.append(txt)
+
             resumo_original = "\n\n".join(resumo_texts)
 
             # 2. Clicar no botão da aba de transcrição
-            clicked = page.evaluate("""() => {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                const transBtn = buttons.find(b => b.innerText.includes("Transcrição"));
-                if (transBtn) {
-                    if (transBtn.disabled) return false;
-                    transBtn.click();
-                    return true;
-                }
-                return false;
-            }""")
+            clicked = False
+            try:
+                # Localizar botão com o texto Transcrição
+                trans_btn = page.locator('button', has_text="Transcrição")
+                # Esperar estar visível (timeout de 5s)
+                trans_btn.wait_for(state="visible", timeout=5000)
+                # Clica e aguarda actionability (se estiver disabled, o Playwright esperará até que seja habilitado)
+                trans_btn.click(timeout=5000)
+                clicked = True
+            except Exception as e:
+                logger.debug(f"Não foi possível clicar no botão de Transcrição usando locator: {e}")
+                # Fallback secundário usando evaluate para compatibilidade
+                clicked = page.evaluate("""() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const transBtn = buttons.find(b => b.innerText.includes("Transcrição"));
+                    if (transBtn && !transBtn.disabled) {
+                        transBtn.click();
+                        return true;
+                    }
+                    return false;
+                }""")
 
             transcricao = ""
             if clicked:
-                # Aguarda renderização da transcrição
+                # Aguarda renderização da transcrição (timeout de 3s)
                 page.wait_for_timeout(3000)
                 # Extrair o conteúdo da transcrição
                 trans_elms = page.query_selector_all(SELECTORS["transcript_item"])

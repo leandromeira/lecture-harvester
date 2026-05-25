@@ -105,10 +105,11 @@ def call_ai(provider: str, model: str, prompt: str, client, temperature: float =
                 return response.content[0].text
                 
             elif provider == "gemini":
-                # Usando o SDK google-genai com configuração de temperatura
+                # Usando o SDK google-genai com configuração de temperatura e formato JSON
                 from google import genai
                 config = genai.types.GenerateContentConfig(
-                    temperature=temperature
+                    temperature=temperature,
+                    response_mime_type="application/json"
                 )
                 response = client.models.generate_content(
                     model=model,
