@@ -1,105 +1,165 @@
 # Lecture Harvester Scraper
 
-Este diretório contém os scripts de automação baseados em **Playwright** para realizar o login e mapear os módulos e aulas da plataforma de ensino Full Cycle.
+O **Lecture Harvester** é um pipeline robusto de ETL automatizado em **Python** e **Playwright** para extrair, processar e organizar aulas e materiais de apoio da plataforma de ensino Full Cycle, convertendo-os em notas de estudo estruturadas no **Obsidian** (segundo cérebro).
 
-## Configuração do Ambiente (`.env`)
+---
 
-Crie ou atualize o arquivo `.env` na raiz do projeto com as seguintes chaves de configuração:
+## 🛠️ Configuração do Ambiente
 
-```env
-# URL base de autenticação da plataforma
-PLATFORM_URL=https://plataforma.fullcycle.com.br/login
+1. **Instalação das Dependências:**
+   Configure seu ambiente virtual e instale os pacotes necessários:
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   playwright install chromium
+   ```
 
-# Nome do curso que você deseja indexar/varrer (deve coincidir com o nome do curso na plataforma)
-COURSE_NAME=MBA em Engenharia de Software com IA
+2. **Arquivo `.env`:**
+   Crie ou configure o arquivo `.env` na raiz do projeto:
+   ```env
+   # Credenciais e URLs
+   PLATFORM_URL=https://plataforma.fullcycle.com.br/login
+   COURSE_NAME=MBA em Engenharia de Software com IA
+   IGNORE_MODULES=Comece por aqui, Bônus MBA, Encontros Ao Vivo, Desafios Técnicos - MBA IA
 
-# Módulos do curso que você quer que o crawler ignore (separados por vírgula)
-# Exemplo: IGNORE_MODULES=Comece por aqui,Bônus MBA
-IGNORE_MODULES=Comece por aqui
+   # Integração com Obsidian
+   OBSIDIAN_VAULT_PATH=/Users/leandromeira/Obsidian
 
-# Caminho para o seu vault do Obsidian (onde as notas de aula serão geradas)
-OBSIDIAN_VAULT_PATH=/Users/leandromeira/Obsidian
+   # Configurações de IA (openai, anthropic ou gemini)
+   AI_PROVIDER=openai
+   AI_MODEL=gpt-4o
+   AI_TEMPERATURE=0.2
 
-# Modelo de IA que será usado no summarize.py
-AI_MODEL=gpt-4o
+   # Chaves de API de IA (Conforme o provedor escolhido)
+   OPENAI_API_KEY=sua-chave-openai
+   GEMINI_API_KEY=sua-chave-gemini
+   ANTHROPIC_API_KEY=sua-chave-anthropic
 
-# Temperatura criativa do modelo de IA (entre 0.0 e 1.0)
-AI_TEMPERATURE=0.2
-```
+   # Configurações de Execução do Scraper
+   MAX_LESSONS_PER_RUN=10
+   PLAYWRIGHT_HEADLESS=true
+   PLAYWRIGHT_TIMEOUT=30000
+   EXTRACTION_WORKERS=4
+   ```
 
-## Como Usar
+---
 
-### 1. Autenticação e Login Inicial
-Para iniciar a sessão de forma segura e visual:
+## 🚀 Guia de Uso Passo a Passo
+
+Para utilizar o sistema de ponta a ponta de forma simples e rápida, siga estas 3 etapas:
+
+### Passo 1: Login Inicial na Plataforma
+Como a plataforma possui mecanismos de segurança, o login inicial é feito em modo interativo visual. Execute:
 ```bash
 venv/bin/python scraper/login.py
 ```
-Isso abrirá uma janela visível do navegador. Complete o login manualmente na plataforma. Assim que você entrar no painel de controle do aluno, o script detectará automaticamente o sucesso, salvará os cookies de sessão no arquivo `config/storage_state.json` e fechará o navegador.
+Isso abrirá o navegador. Faça o login manualmente. Assim que entrar no painel do aluno, o script salvará os cookies de sessão de forma segura em `config/storage_state.json` e fechará a janela. Os próximos comandos usarão essa sessão em modo headless.
 
-### 2. Mapear o Curso (Crawl)
-Para indexar os módulos e aulas do curso configurado na variável `COURSE_NAME`:
+### Passo 2: Executar o Pipeline Completo (ETL)
+Para varrer o curso, extrair as aulas pendentes, baixar arquivos de apoio, enriquecê-los (Notion/GitHub), processar os resumos por IA e salvar no Obsidian, basta executar um único comando:
 ```bash
-venv/bin/python scraper/crawl_course.py
-```
-O script gerará ou atualizará de forma incremental (Sync Mode) o arquivo de índice em `data/raw/course_index.json`.
-
-Para listar os cursos disponíveis na conta:
-```bash
-venv/bin/python main.py sync --list-courses
+venv/bin/python main.py pipeline
 ```
 
-Para sincronizar um curso específico pelo ID:
+### Passo 3: Abrir no Obsidian
+As notas de aula serão organizadas em pastas por módulo dentro do seu Vault do Obsidian, contendo o índice do módulo (`00 - Índice - <Módulo>.md`), anexos locais copiados na pasta `/attachments` de cada módulo e as conexões (`[[Wikilinks]]`) para navegação facilitada.
+
+---
+
+## ⚙️ Comandos Detalhados da CLI e Flags Opcionais
+
+O Lecture Harvester é controlado por subcomandos através do arquivo `main.py`.
+
+### 1. `pipeline` (Orquestração Completa)
+Executa todo o fluxo de ponta a ponta de forma sequencial.
 ```bash
-venv/bin/python main.py sync --course-id <ID_DO_CURSO>
+venv/bin/python main.py pipeline [flags]
+```
+* **Flags Opcionais:**
+  * `--mock`: Roda o pipeline simulando dados de teste fictícios (sem fazer requisições reais ou gastar tokens).
+  * `--limit <N>`: Limita a quantidade de novas aulas a extrair nesta execução. Sobrescreve `MAX_LESSONS_PER_RUN`.
+  * `--skip-ai`: Pula a sumarização avançada da IA. Gera notas mais simples com resumo da plataforma e transcrição.
+  * `--skip-enrich`: Pula a etapa de enriquecimento de anexos (clonagem do GitHub e snapshots de Notion).
+  * `--course-id <ID>`: ID específico do curso a sincronizar, pulando a detecção automática por nome.
+
+### 2. `login` (Autenticação manual/forçada)
+```bash
+venv/bin/python main.py login [flags]
+```
+* **Flags Opcionais:**
+  * `--force`: Ignora qualquer sessão anterior e força a abertura de uma nova janela headed para login.
+
+### 3. `sync` (Sincronização de Estrutura)
+Sincroniza apenas a listagem de aulas e módulos, gerando o arquivo local `data/raw/course_index.json`.
+```bash
+venv/bin/python main.py sync [flags]
+```
+* **Flags Opcionais:**
+  * `--list-courses`: Apenas lista todos os cursos disponíveis na conta com seus respectivos IDs e encerra.
+  * `--course-id <ID>`: Mapeia um curso específico pelo ID fornecido.
+
+### 4. `extract` (Extração Individual)
+Extrai o conteúdo bruto de uma única aula e salva o JSON em `data/raw`.
+```bash
+venv/bin/python main.py extract --url <URL> --modulo <NOME> --aula <TITULO> --slug <SLUG> [flags]
+```
+* **Flags Requeridas:**
+  * `--url`: URL da aula na plataforma.
+  * `--modulo`: Nome do módulo correspondente.
+  * `--aula`: Título da aula.
+  * `--slug`: Nome amigável de arquivo a ser salvo (ex: `introducao-a-tokens`).
+* **Flags Opcionais:**
+  * `--curso <NOME>`: Nome do curso (padrão é o configurado no `.env`).
+  * `--mock`: Salva dados simulados de teste.
+
+### 5. `attachments-enrich` (Enriquecimento Isolado)
+Processa materiais de apoio (clona/zipa repositórios do GitHub, faz snapshot textual de Notion e gera resumos com IA).
+```bash
+venv/bin/python main.py attachments-enrich [flags]
+```
+* **Flags Opcionais:**
+  * `--file <CAMINHO>`: Processa apenas o arquivo JSON bruto de uma aula específica.
+  * `--all`: Processa materiais de todas as aulas presentes na pasta `data/raw`.
+  * `--no-ai`: Desativa a sumarização dos anexos por IA (apenas faz o clone/snapshot e zip).
+  * `--force`: Força re-enriquecer materiais que já possuem o status de enriquecidos.
+  * `--limit <N>`: Limita a quantidade de aulas enriquecidas de cada vez.
+
+### 6. `process` (Enriquecimento IA da Aula)
+Roda os prompts de IA de resumo executivo, conceitos e flashcards no JSON bruto.
+```bash
+venv/bin/python main.py process [flags]
+```
+* **Flags Opcionais:**
+  * `--file <CAMINHO>`: Processa apenas uma aula específica.
+  * `--all`: Enriquece todas as aulas brancas pendentes locais.
+  * `--force`: Força reprocessar a IA de aulas já enriquecidas no cache local.
+
+### 7. `markdown` (Geração de Notas)
+Gera os arquivos markdown e os copia junto dos anexos para o Obsidian.
+```bash
+venv/bin/python main.py markdown [flags]
+```
+* **Flags Opcionais:**
+  * `--file <CAMINHO>`: Gera a nota markdown de uma aula específica.
+  * `--all`: Gera a nota markdown de todas as aulas em cache.
+  * `--skip-ai`: Gera a nota sem incluir o conteúdo da IA.
+
+### 8. `index` (Geração de Índices)
+Reconstrói os arquivos `00 - Índice - <Módulo>.md` e `00 - Índice Geral.md` no Obsidian de forma organizada por módulo e numeração de aula.
+```bash
+venv/bin/python main.py index
 ```
 
-### 3. Reindexar Tudo (Sobrescrever o Índice)
-Se você precisar reconstruir ou reindexar totalmente o arquivo de índice desabilitando o modo incremental:
-```bash
-venv/bin/python scraper/crawl_course.py --no-sync
-```
-Isso ignorará o índice anterior e gerará uma nova lista do zero contendo apenas o estado atualizado das aulas.
+---
 
-### 4. Materiais de Apoio
-Durante a extração de aula, links de materiais são detectados e classificados (`direct_file`, `github_repo`, `notion_page`, `external_link`).
+## 📈 Rastreamento de Custos e Tokens
 
-Arquivos diretos (`direct_file`) são baixados para:
-- `data/raw/<módulo>/attachments/<slug-da-aula>/`
-
-Todos os materiais são registrados no JSON bruto em `materiais_apoio` com status de enriquecimento.
-
-Para enriquecer links de GitHub/Notion (clonar/zipar repositório, snapshot de página e resumo opcional com IA):
-```bash
-venv/bin/python main.py attachments-enrich --file "data/raw/<modulo>/<aula>.json"
-```
-
-Processando todas as aulas:
-```bash
-venv/bin/python main.py attachments-enrich --all
-```
-
-Sem IA (apenas captura de artefatos):
-```bash
-venv/bin/python main.py attachments-enrich --all --no-ai
-```
-
-Após enriquecer, gere/atualize a nota:
-```bash
-venv/bin/python main.py markdown --file "data/raw/<modulo>/<aula>.json" --skip-ai
-```
-
-A nota Markdown inclui os links de materiais e os artefatos locais, que também são copiados para a pasta `attachments/` do módulo no Obsidian.
-
-### 5. Auditoria de Custos e Tokens
-Toda chamada de IA (pipeline de resumo e enriquecimento de materiais) registra consumo e custo estimado em:
+Toda chamada de IA (pipeline de resumos e enriquecimento de anexos) é auditada. O consumo detalhado é salvo em:
 - `logs/cost_tracker.csv`
 
-Campos registrados:
-- `provider`, `model`, `call_context`, `status`
+Campos monitorados:
+- `timestamp_utc`, `provider`, `model`, `call_context`, `status`
 - `input_tokens`, `output_tokens`, `total_tokens`
 - `input_cost_usd`, `output_cost_usd`, `total_cost_usd`
-
-Exemplo para visualizar os últimos registros:
-```bash
-tail -n 20 logs/cost_tracker.csv
-```
+- `error_message`
