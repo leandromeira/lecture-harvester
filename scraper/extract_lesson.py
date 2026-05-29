@@ -70,6 +70,8 @@ def detect_material_type(title, url):
     query_lower = parsed.query.lower()
 
     if "github.com" in netloc_lower:
+        if "/blob/" in path_lower:
+            return "direct_file"
         segments = [seg for seg in parsed.path.split("/") if seg]
         if len(segments) >= 2:
             return "github_repo"
@@ -80,11 +82,8 @@ def detect_material_type(title, url):
     if any(path_lower.endswith(ext) for ext in ATTACHMENT_EXTENSIONS):
         return "direct_file"
 
-    if "download" in query_lower and "github.com" not in netloc_lower and "notion" not in netloc_lower:
-        return "direct_file"
-
-    if "drive.google.com" in netloc_lower and "/uc" in path_lower and "export=download" in query_lower:
-        return "direct_file"
+    if "drive.google.com" in netloc_lower:
+        return "google_drive"
 
     return "external_link"
 
@@ -92,10 +91,42 @@ def collect_support_materials(page):
     """Coleta links candidatos a materiais de apoio na página da aula."""
     links = page.evaluate("""() => {
         const anchors = Array.from(document.querySelectorAll('a[href]'));
-        return anchors.map((a) => ({
-            title: (a.innerText || a.textContent || '').trim(),
-            url: a.href
-        }));
+        return anchors.filter(a => {
+            const href = a.href;
+            if (!href.startsWith('http') || href.includes('plataforma.fullcycle')) return false;
+            
+            // Filtrar links institucionais do rodapé
+            if (href.includes('fullcycle.com.br/validar-certificado') || 
+                href.includes('fullcycle.com.br/politica') || 
+                href.includes('fullcycle.com.br/termos') || 
+                href.includes('faq')) {
+                return false;
+            }
+            
+            // Filtrar links que estão dentro do menu lateral (sidebar/acordeão)
+            let isSidebar = false;
+            let parent = a.parentElement;
+            while (parent) {
+                if (parent.classList && (
+                    parent.classList.contains('MuiCollapse-root') || 
+                    parent.classList.contains('MuiAccordion-root') ||
+                    parent.classList.contains('MuiListItem-root')
+                )) {
+                    isSidebar = true;
+                    break;
+                }
+                parent = parent.parentElement;
+            }
+            return !isSidebar;
+        }).map((a) => {
+            let txt = (a.innerText || a.textContent || '').trim();
+            // Remove sufixos de tempo (ex: "Slides120:00" -> "Slides", "Docker25:00" -> "Docker")
+            txt = txt.replace(/\\s*\\d{2}:\\d{2}$/, '').trim();
+            return {
+                title: txt || 'Material de Apoio',
+                url: a.href
+            };
+        });
     }""")
 
     materials = []
@@ -113,7 +144,7 @@ def collect_support_materials(page):
                 "tipo": material_type,
                 "baixado": False,
                 "arquivo_local": None,
-                "status": "pendente_enriquecimento" if material_type in ("github_repo", "notion_page") else "capturado"
+                "status": "pendente_enriquecimento" if material_type in ("github_repo", "notion_page", "google_drive") else "capturado"
             })
             seen_urls.add(url)
     return materials
@@ -148,7 +179,12 @@ def download_support_materials(page, materials, attachments_dir):
             dedupe += 1
 
         try:
-            response = page.request.get(url, timeout=30000)
+            download_url = url
+            if "github.com" in urlparse(url).netloc.lower() and "/blob/" in urlparse(url).path.lower():
+                download_url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+                logger.info(f"Convertendo URL do GitHub para raw para download: {url} -> {download_url}")
+
+            response = page.request.get(download_url, timeout=30000)
             if response.ok:
                 target_path.write_bytes(response.body())
                 try:
@@ -218,6 +254,34 @@ def extract_lesson(url, modulo_nome, aula_titulo, slug, mock=False, curso_nome=N
         logger.info(f"[MOCK] JSON gerado com sucesso em {output_path}")
         return data
 
+    is_external = "plataforma.fullcycle.com.br" not in urlparse(url or "").netloc.lower()
+    if is_external:
+        logger.info(f"Aula/Material '{aula_titulo}' é um link externo: {url}. Salvando metadados diretamente sem abrir o navegador...")
+        material_type = detect_material_type(aula_titulo, url)
+        data = {
+            "curso": curso,
+            "modulo": modulo_nome or "Geral",
+            "aula": aula_titulo,
+            "url": url,
+            "transcricao": "",
+            "resumo_original": f"Material de apoio externo: {aula_titulo}",
+            "materiais_apoio": [
+                {
+                    "titulo": aula_titulo,
+                    "url": url,
+                    "tipo": material_type,
+                    "baixado": False,
+                    "arquivo_local": None,
+                    "status": "pendente_enriquecimento" if material_type in ("github_repo", "notion_page") else "capturado"
+                }
+            ]
+        }
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        logger.info(f"JSON de material externo salvo com sucesso em {output_path}")
+        return data
+
     if not STATE_PATH.exists():
         logger.error("Sessão expirada ou arquivo de storage_state não encontrado. Faça o login primeiro.")
         return None
@@ -233,12 +297,14 @@ def extract_lesson(url, modulo_nome, aula_titulo, slug, mock=False, curso_nome=N
             # Usar domcontentloaded e aguardar de forma inteligente o carregamento dos componentes React
             page.goto(url, timeout=int(os.getenv("PLAYWRIGHT_TIMEOUT", 30000)), wait_until="domcontentloaded")
             try:
-                page.wait_for_selector('button[role="tab"]', timeout=10000)
-                # Esperar o container de resumo aparecer na tela (se existir)
-                page.wait_for_selector('.MuiTypography-h5', timeout=5000)
+                # Tenta esperar que o player de vídeo ou o resumo da aula apareça na tela
+                page.wait_for_selector('video, iframe[src*="mediadelivery"], iframe[src*="vimeo"], iframe[src*="youtube"], iframe[src*="panda"], .MuiTypography-h5', timeout=10000)
             except Exception:
-                # Fallback de tempo de segurança caso a rede esteja lenta ou a página não tenha resumo
-                page.wait_for_timeout(2000)
+                # Fallback de segurança caso a rede esteja lenta
+                page.wait_for_timeout(3000)
+            
+            # Delay de estabilização
+            page.wait_for_timeout(1500)
 
             # Priorizar o título recebido do índice (aula_titulo), caindo de volta para a extração do DOM
             extracted_title = (aula_titulo or "").strip()
@@ -263,6 +329,20 @@ def extract_lesson(url, modulo_nome, aula_titulo, slug, mock=False, curso_nome=N
                         resumo_texts.append(txt)
 
             resumo_original = "\n\n".join(resumo_texts)
+
+            # Fallback secundário para aulas escritas ou sem vídeo
+            if not resumo_original.strip():
+                main_containers = page.query_selector_all("main, article, .MuiGrid-root")
+                main_texts = []
+                for mc in main_containers:
+                    # Evitar pegar menus laterais, cabeçalhos ou barras de navegação
+                    if mc.query_selector("video") or mc.query_selector("button[role='tab']"):
+                        continue
+                    txt = mc.inner_text().strip()
+                    if len(txt) > 200 and txt not in main_texts:
+                        main_texts.append(txt)
+                if main_texts:
+                    resumo_original = max(main_texts, key=len)
 
             # 2. Clicar no botão da aba de transcrição
             clicked = False

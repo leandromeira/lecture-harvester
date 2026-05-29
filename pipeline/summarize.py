@@ -180,16 +180,12 @@ def process_lesson_ai(raw_json_path: Path, force=False) -> bool:
         logger.warning(f"Transcrição vazia após limpeza para {raw_json_path.name}. Usando resumo original como contexto.")
         cleaned = f"Sem transcrição disponível. Resumo Original: {lesson_data.get('resumo_original', '')}"
 
-    # Carrega prompts
+    # Carrega o prompt unificado
     try:
         with open(PROMPTS_DIR / "summarize.txt", "r", encoding="utf-8") as f:
-            prompt_sum_tmpl = f.read()
-        with open(PROMPTS_DIR / "concepts.txt", "r", encoding="utf-8") as f:
-            prompt_con_tmpl = f.read()
-        with open(PROMPTS_DIR / "flashcards.txt", "r", encoding="utf-8") as f:
-            prompt_fla_tmpl = f.read()
+            prompt_tmpl = f.read()
     except Exception as e:
-        logger.error(f"Erro ao ler arquivos de prompt em '{PROMPTS_DIR}': {e}")
+        logger.error(f"Erro ao ler arquivo de prompt unificado em '{PROMPTS_DIR}': {e}")
         return False
 
     # Configura parâmetros de IA
@@ -204,7 +200,7 @@ def process_lesson_ai(raw_json_path: Path, force=False) -> bool:
         logger.warning(f"Temperatura inválida no env: '{temp_str}'. Usando valor padrão 0.2.")
         temperature = 0.2
 
-    # Dados comuns para formatação dos prompts
+    # Dados comuns para formatação do prompt
     context = {
         "curso": lesson_data.get("curso", "MBA IA"),
         "modulo": lesson_data.get("modulo", "Geral"),
@@ -213,54 +209,41 @@ def process_lesson_ai(raw_json_path: Path, force=False) -> bool:
         "transcricao": cleaned
     }
 
-    # Executar as 3 chamadas em paralelo e converter em JSON
+    # Executar a chamada única à IA e converter em JSON
     try:
-        p_sum = format_prompt(prompt_sum_tmpl, context)
-        p_con = format_prompt(prompt_con_tmpl, context)
-        p_fla = format_prompt(prompt_fla_tmpl, context)
-
-        def run_prompt(prompt_name: str, prompt_text: str) -> dict:
-            logger.info(f"Executando prompt de {prompt_name}...")
-            client = get_ai_client(provider)
-            response_text = call_ai(
-                provider,
-                model,
-                prompt_text,
-                client,
-                temperature=temperature,
-                call_context=f"summarize:{prompt_name.lower()}"
-            )
-            return extract_json_block(response_text)
-
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {
-                "sum": executor.submit(run_prompt, "Resumo", p_sum),
-                "con": executor.submit(run_prompt, "Conceitos", p_con),
-                "fla": executor.submit(run_prompt, "Flashcards", p_fla),
-            }
-            res_sum = futures["sum"].result()
-            res_con = futures["con"].result()
-            res_fla = futures["fla"].result()
+        prompt_text = format_prompt(prompt_tmpl, context)
+        logger.info(f"Executando chamada única de IA para resumir e enriquecer...")
+        
+        client = get_ai_client(provider)
+        response_text = call_ai(
+            provider,
+            model,
+            prompt_text,
+            client,
+            temperature=temperature,
+            call_context="summarize:single_call"
+        )
+        res_json = extract_json_block(response_text)
 
     except Exception as e:
-        logger.exception(f"Erro nas chamadas de API de IA: {e}")
+        logger.exception(f"Erro na chamada de API de IA: {e}")
         return False
 
-    # Mesclar resultados de IA
+    # Mapear os resultados consolidados
     enriched_data = {
         "curso": lesson_data.get("curso"),
         "modulo": lesson_data.get("modulo"),
         "aula": lesson_data.get("aula"),
         "url": lesson_data.get("url"),
-        "resumo_executivo": res_sum.get("resumo_executivo", "Não gerado."),
-        "pontos_importantes": res_sum.get("pontos_importantes", []),
-        "tags": res_sum.get("tags", []),
-        "relacoes": res_sum.get("relacoes", []),
-        "conceitos": res_con.get("conceitos", []),
-        "explicacao_simplificada": res_con.get("explicacao_simplificada", "Não gerada."),
-        "exemplos_citados": res_con.get("exemplos_citados", []),
-        "perguntas_revisao": res_fla.get("perguntas_revisao", []),
-        "flashcards": res_fla.get("flashcards", [])
+        "resumo_executivo": res_json.get("resumo_executivo", "Não gerado."),
+        "pontos_importantes": res_json.get("pontos_importantes", []),
+        "tags": res_json.get("tags", []),
+        "relacoes": res_json.get("relacoes", []),
+        "conceitos": res_json.get("conceitos", []),
+        "explicacao_simplificada": res_json.get("explicacao_simplificada", "Não gerada."),
+        "exemplos_citados": res_json.get("exemplos_citados", []),
+        "perguntas_revisao": res_json.get("perguntas_revisao", []),
+        "flashcards": res_json.get("flashcards", [])
     }
 
     # Salva o arquivo enriquecido

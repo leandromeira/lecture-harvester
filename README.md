@@ -1,6 +1,6 @@
 # Lecture Harvester Scraper
 
-O **Lecture Harvester** é um pipeline robusto de ETL automatizado em **Python** e **Playwright** para extrair, processar e organizar aulas e materiais de apoio da plataforma de ensino Full Cycle, convertendo-os em notas de estudo estruturadas no **Obsidian** (segundo cérebro).
+O **Lecture Harvester** é um pipeline de ETL automatizado em **Python** e **Playwright** para extrair, processar e organizar aulas e materiais de apoio da plataforma de ensino Full Cycle, convertendo-os em notas de estudo estruturadas no **Obsidian**.
 
 ---
 
@@ -20,11 +20,11 @@ O **Lecture Harvester** é um pipeline robusto de ETL automatizado em **Python**
    ```env
    # Credenciais e URLs
    PLATFORM_URL=https://plataforma.fullcycle.com.br/login
-   COURSE_NAME=MBA em Engenharia de Software com IA
-   IGNORE_MODULES=Comece por aqui, Bônus MBA, Encontros Ao Vivo, Desafios Técnicos - MBA IA
+   COURSE_NAME=
+   IGNORE_MODULES=
 
    # Integração com Obsidian
-   OBSIDIAN_VAULT_PATH=/Users/leandromeira/Obsidian
+   OBSIDIAN_VAULT_PATH=
 
    # Configurações de IA (openai, anthropic ou gemini)
    AI_PROVIDER=openai

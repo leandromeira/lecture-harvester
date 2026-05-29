@@ -227,10 +227,12 @@ def sync_attachments_to_obsidian(raw_data: dict, obsidian_dir: Path):
             if not target_path.exists():
                 shutil.copy2(source_path, target_path)
 
-def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = None, skip_ai=False) -> Path:
+def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = None, skip_ai=False, force=False) -> Path:
     """
     Lê o JSON bruto (e o JSON processado de IA se não for skip_ai e existir) e gera o arquivo
     Markdown dentro do Vault do Obsidian definido nas configurações.
+    Evita regerar se os arquivos de destino já existirem e forem mais novos que as entradas,
+    a menos que force=True.
     """
     if not raw_json_path.exists():
         logger.error(f"Arquivo JSON bruto não encontrado em: {raw_json_path}")
@@ -242,8 +244,10 @@ def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = 
 
     # Tenta carregar dados processados pela IA se não ignorarmos a IA e o arquivo existir
     processed_data = None
+    processed_json_path_resolved = None
     if not skip_ai:
         if processed_json_path and processed_json_path.exists():
+            processed_json_path_resolved = processed_json_path
             try:
                 with open(processed_json_path, "r", encoding="utf-8") as f:
                     processed_data = json.load(f)
@@ -253,6 +257,7 @@ def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = 
             # Se não passado explicitamente, tenta localizar no caminho padrão
             default_processed_path = Path(__file__).resolve().parents[1] / "data" / "processed" / raw_json_path.relative_to(raw_json_path.parents[1])
             if default_processed_path.exists():
+                processed_json_path_resolved = default_processed_path
                 try:
                     with open(default_processed_path, "r", encoding="utf-8") as f:
                         processed_data = json.load(f)
@@ -274,6 +279,24 @@ def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = 
     
     obsidian_dir = vault_path / course_name / modulo_clean
     obsidian_file_path = obsidian_dir / f"{aula_clean}.md"
+    
+    # Caminho local do cache do markdown
+    local_md_dir = Path(__file__).resolve().parents[1] / "data" / "markdown" / modulo_clean
+    local_md_file_path = local_md_dir / f"{aula_clean}.md"
+
+    # Verificação incremental de modificação
+    if not force and obsidian_file_path.exists() and local_md_file_path.exists():
+        raw_mtime = raw_json_path.stat().st_mtime
+        processed_mtime = processed_json_path_resolved.stat().st_mtime if processed_json_path_resolved else 0
+        
+        obsidian_mtime = obsidian_file_path.stat().st_mtime
+        local_md_mtime = local_md_file_path.stat().st_mtime
+        
+        if obsidian_mtime >= raw_mtime and obsidian_mtime >= processed_mtime and local_md_mtime >= raw_mtime and local_md_mtime >= processed_mtime:
+            logger.info(f"Markdown incremental: Nota já está atualizada no Obsidian para a aula '{aula_titulo}' (pulando geração).")
+            # Garante que os anexos estejam sincronizados
+            sync_attachments_to_obsidian(raw_data, obsidian_dir)
+            return obsidian_file_path
 
     # Constrói o conteúdo em Markdown
     markdown_content = build_markdown_content(raw_data, processed_data)
@@ -289,9 +312,8 @@ def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = 
         sync_attachments_to_obsidian(raw_data, obsidian_dir)
         
         # Salva também um cache local de Markdown para segurança
-        local_md_dir = Path(__file__).resolve().parents[1] / "data" / "markdown" / modulo_clean
         local_md_dir.mkdir(parents=True, exist_ok=True)
-        with open(local_md_dir / f"{aula_clean}.md", "w", encoding="utf-8") as f:
+        with open(local_md_file_path, "w", encoding="utf-8") as f:
             f.write(markdown_content)
 
         logger.info(f"Markdown gerado e salvo com sucesso no Obsidian: {obsidian_file_path}")

@@ -213,7 +213,6 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
                     }""")
                     page.wait_for_timeout(2000)
 
-                    # Extrair os capítulos e suas aulas internas do DOM
                     chapters = page.evaluate("""() => {
                         const results = [];
                         const chapterElms = document.querySelectorAll('[id^="chapter-"]');
@@ -222,20 +221,34 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
                             const titleEl = elm.querySelector('h5');
                             const chapTitle = titleEl ? titleEl.innerText.trim() : '';
                             
-                            const liElms = elm.querySelectorAll('li[id^="list-content-"]');
+                            // Seleciona tanto li quanto a tags com id iniciando com list-content-
+                            const itemElms = elm.querySelectorAll('[id^="list-content-"]');
                             const lessons = [];
                             
-                            liElms.forEach((li) => {
-                                const liId = li.id;
-                                const conteudoId = liId.replace('list-content-', '');
+                            itemElms.forEach((item) => {
+                                const itemId = item.id;
+                                const conteudoId = itemId.replace('list-content-', '');
                                 
-                                const textEl = li.querySelector('.MuiListItemText-primary');
-                                const lessonTitle = textEl ? textEl.innerText.trim() : '';
+                                const textEl = item.querySelector('.MuiListItemText-primary');
+                                let lessonTitle = '';
+                                if (textEl) {
+                                    lessonTitle = textEl.textContent.trim();
+                                } else {
+                                    lessonTitle = item.textContent.trim();
+                                }
+                                
+                                // Limpa sufixos de tempo (ex: "Slides120:00" -> "Slides", "Docker25:00" -> "Docker")
+                                lessonTitle = lessonTitle.replace(/\\s*\\d{2}:\\d{2}$/, '').trim();
+                                
+                                const isExternal = item.tagName.toLowerCase() === 'a';
+                                const externalUrl = isExternal ? item.href : null;
                                 
                                 if (lessonTitle) {
                                     lessons.push({
                                         title: lessonTitle,
-                                        id: conteudoId
+                                        id: conteudoId,
+                                        is_external: isExternal,
+                                        external_url: externalUrl
                                     });
                                 }
                             });
@@ -259,9 +272,15 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
                         for lesson in chap["lessons"]:
                             lesson_title = lesson["title"]
                             lesson_id = lesson["id"]
+                            is_external = lesson.get("is_external", False)
+                            external_url = lesson.get("external_url")
                             
-                            # Formatar URL no padrão Full Cycle para aulas
-                            lesson_url = f"{m_url}?capitulo={modulo_id}&conteudo={lesson_id}"
+                            # Formatar URL
+                            if is_external:
+                                lesson_url = external_url
+                            else:
+                                lesson_url = f"{m_url}?capitulo={modulo_id}&conteudo={lesson_id}"
+                                
                             lesson_slug = clean_slug(lesson_title)
                             
                             # Título composto: Capítulo - Aula
@@ -272,9 +291,18 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
                                 "url": lesson_url,
                                 "slug": lesson_slug
                             }
+                            if is_external:
+                                aula_data["is_external"] = True
+                                aula_data["external_url"] = external_url
+                                
                             aulas.append(aula_data)
                             
-                            if lesson_url not in existing_urls:
+                            # Verifica se o arquivo JSON bruto correspondente já existe fisicamente no disco
+                            raw_dir = INDEX_PATH.parent
+                            mod_clean = re.sub(r'[^a-zA-Z0-9\s_-]', '', m_title or "").strip()
+                            raw_file_path = raw_dir / mod_clean / f"{lesson_slug}.json"
+                            
+                            if lesson_url not in existing_urls or not raw_file_path.exists():
                                 new_lessons_found.append({
                                     "curso": course_full_name or target_course_name or "Curso",
                                     "modulo": m_title,

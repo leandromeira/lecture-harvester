@@ -25,7 +25,7 @@ logger = setup_processing_logger()
 RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parent / "data" / "processed"
 
-def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None, skip_enrich=False):
+def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None, skip_enrich=False, force_markdown=False):
     """
     Executa o fluxo completo do pipeline (ETL):
     1. Sincroniza o índice do curso (sync).
@@ -127,7 +127,7 @@ def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None, ski
                 processed_count += 1
         
         # Gera o markdown para o Obsidian
-        md_file = generate_obsidian_markdown(rf, skip_ai=skip_ai)
+        md_file = generate_obsidian_markdown(rf, skip_ai=skip_ai, force=force_markdown)
         if md_file:
             markdown_count += 1
 
@@ -175,6 +175,7 @@ def main():
     parser_md.add_argument("--file", type=str, help="Caminho do arquivo JSON bruto")
     parser_md.add_argument("--all", action="store_true", help="Gera markdown para todas as aulas no cache")
     parser_md.add_argument("--skip-ai", action="store_true", help="Gera notas sem o conteúdo de IA (apenas resumo e transcrição)")
+    parser_md.add_argument("--force", action="store_true", help="Força a regeneração de todas as notas do Obsidian")
 
     # Subcomando: attachments-enrich
     parser_att = subparsers.add_parser("attachments-enrich", help="Enriquece materiais de apoio (Notion/GitHub)")
@@ -194,6 +195,7 @@ def main():
     parser_pipe.add_argument("--skip-ai", action="store_true", help="Pula a etapa de enriquecimento de IA, gerando notas apenas com resumo e transcrição")
     parser_pipe.add_argument("--skip-enrich", action="store_true", help="Pula a etapa de enriquecimento de materiais de apoio (Notion/GitHub)")
     parser_pipe.add_argument("--course-id", type=str, help="ID do curso na plataforma para sincronizar no pipeline")
+    parser_pipe.add_argument("--force-markdown", action="store_true", help="Força a regeneração de todas as notas do Obsidian no pipeline")
 
     args = parser.parse_args()
 
@@ -238,16 +240,16 @@ def main():
             
     elif args.command == "markdown":
         if args.file:
-            md_file = generate_obsidian_markdown(Path(args.file), skip_ai=args.skip_ai)
+            md_file = generate_obsidian_markdown(Path(args.file), skip_ai=args.skip_ai, force=args.force)
             sys.exit(0 if md_file else 1)
         elif args.all:
             raw_files = list(RAW_DIR.glob("**/*.json"))
             raw_files = [rf for rf in raw_files if rf.name != "course_index.json"]
             count = 0
             for rf in raw_files:
-                if generate_obsidian_markdown(rf, skip_ai=args.skip_ai):
+                if generate_obsidian_markdown(rf, skip_ai=args.skip_ai, force=args.force):
                     count += 1
-            logger.info(f"Concluído: {count} arquivos Markdown gerados no vault.")
+            logger.info(f"Concluído: {count} arquivos Markdown processados no vault.")
         else:
             parser_md.print_help()
 
@@ -273,7 +275,8 @@ def main():
             limit=args.limit,
             skip_ai=args.skip_ai,
             course_id=args.course_id,
-            skip_enrich=args.skip_enrich
+            skip_enrich=args.skip_enrich,
+            force_markdown=args.force_markdown
         )
         
     else:
