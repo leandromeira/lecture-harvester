@@ -80,8 +80,9 @@ venv/bin/python main.py pipeline [flags]
   * `--mock`: Roda o pipeline simulando dados de teste fictícios (sem fazer requisições reais ou gastar tokens).
   * `--limit <N>`: Limita a quantidade de novas aulas a extrair nesta execução. Sobrescreve `MAX_LESSONS_PER_RUN`.
   * `--skip-ai`: Pula a sumarização avançada da IA. Gera notas mais simples com resumo da plataforma e transcrição.
-  * `--skip-enrich`: Pula a etapa de enriquecimento de anexos (clonagem do GitHub e snapshots de Notion).
+  * `--skip-enrich`: Pula a etapa de enriquecimento de anexos (clonagem do GitHub, snapshots de Notion e downloads do Google Drive).
   * `--course-id <ID>`: ID específico do curso a sincronizar, pulando a detecção automática por nome.
+  * `--force-markdown`: Força a regeneração de todas as notas do Obsidian, mesmo que os dados brutos de entrada não tenham sido alterados.
 
 ### 2. `login` (Autenticação manual/forçada)
 ```bash
@@ -114,19 +115,18 @@ venv/bin/python main.py extract --url <URL> --modulo <NOME> --aula <TITULO> --sl
   * `--mock`: Salva dados simulados de teste.
 
 ### 5. `attachments-enrich` (Enriquecimento Isolado)
-Processa materiais de apoio (clona/zipa repositórios do GitHub, faz snapshot textual de Notion e gera resumos com IA).
+Processa materiais de apoio (clona/zipa repositórios do GitHub, faz snapshot textual de Notion e realiza download de arquivos públicos do Google Drive).
 ```bash
 venv/bin/python main.py attachments-enrich [flags]
 ```
 * **Flags Opcionais:**
   * `--file <CAMINHO>`: Processa apenas o arquivo JSON bruto de uma aula específica.
   * `--all`: Processa materiais de todas as aulas presentes na pasta `data/raw`.
-  * `--no-ai`: Desativa a sumarização dos anexos por IA (apenas faz o clone/snapshot e zip).
-  * `--force`: Força re-enriquecer materiais que já possuem o status de enriquecidos.
+  * `--force`: Força re-enriquecer materiais que já possuem o status de enriquecidos/baixados.
   * `--limit <N>`: Limita a quantidade de aulas enriquecidas de cada vez.
 
 ### 6. `process` (Enriquecimento IA da Aula)
-Roda os prompts de IA de resumo executivo, conceitos e flashcards no JSON bruto.
+Roda o prompt consolidado de IA (resumo executivo, conceitos e flashcards) em uma chamada única no JSON bruto (economizando cerca de 66% de tokens de entrada).
 ```bash
 venv/bin/python main.py process [flags]
 ```
@@ -136,7 +136,7 @@ venv/bin/python main.py process [flags]
   * `--force`: Força reprocessar a IA de aulas já enriquecidas no cache local.
 
 ### 7. `markdown` (Geração de Notas)
-Gera os arquivos markdown e os copia junto dos anexos para o Obsidian.
+Gera os arquivos markdown e os copia junto dos anexos para o Obsidian usando build incremental (só regera notas se os arquivos de dados brutos ou processados forem mais recentes que a nota do Obsidian).
 ```bash
 venv/bin/python main.py markdown [flags]
 ```
@@ -144,6 +144,7 @@ venv/bin/python main.py markdown [flags]
   * `--file <CAMINHO>`: Gera a nota markdown de uma aula específica.
   * `--all`: Gera a nota markdown de todas as aulas em cache.
   * `--skip-ai`: Gera a nota sem incluir o conteúdo da IA.
+  * `--force`: Força a regeneração de todas as notas do Obsidian, ignorando a data de modificação.
 
 ### 8. `index` (Geração de Índices)
 Reconstrói os arquivos `00 - Índice - <Módulo>.md` e `00 - Índice Geral.md` no Obsidian de forma organizada por módulo e numeração de aula.
