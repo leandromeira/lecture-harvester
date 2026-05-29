@@ -1,6 +1,8 @@
 import os
 import sys
 import argparse
+import time
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from dotenv import load_dotenv
@@ -86,7 +88,7 @@ def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None, ski
 
         def extract_one_lesson(lesson):
             logger.info(f"Extraindo: {lesson['titulo']} do {lesson['modulo']}")
-            return extract_lesson(
+            res = extract_lesson(
                 url=lesson["url"],
                 modulo_nome=lesson["modulo"],
                 aula_titulo=lesson["titulo"],
@@ -94,6 +96,11 @@ def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None, ski
                 mock=mock,
                 curso_nome=lesson.get("curso")
             )
+            if not mock:
+                delay = random.randint(3, 7)
+                logger.info(f"Pausa anti-rate-limit: aguardando {delay} segundos...")
+                time.sleep(delay)
+            return res
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(extract_one_lesson, lesson) for lesson in lessons_to_process]

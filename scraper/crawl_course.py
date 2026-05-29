@@ -108,7 +108,11 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
             courses_url = "https://plataforma.fullcycle.com.br/courses"
             logger.info(f"Navegando para a listagem de cursos: {courses_url}")
             page.goto(courses_url, timeout=60000, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
+            try:
+                page.wait_for_selector('a[href*="/courses/"]', timeout=15000)
+            except Exception:
+                logger.warning("Timeout aguardando links de cursos. Tentando prosseguir...")
+            page.wait_for_timeout(1000)
             logger.info(f"Página carregada. URL atual: {page.url} | Título: {page.title()}")
 
             # 2. Encontrar cursos e selecionar dinamicamente
@@ -159,7 +163,11 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
 
             # 3. Navegar para a página do curso e extrair os módulos
             page.goto(course_url, timeout=60000, wait_until="domcontentloaded")
-            page.wait_for_timeout(4000)
+            try:
+                page.wait_for_selector('a[href*="/conteudos"]', timeout=15000)
+            except Exception:
+                logger.warning("Timeout aguardando módulos do curso. Tentando prosseguir...")
+            page.wait_for_timeout(1000)
             
             logger.info("Extraindo módulos da página do curso...")
             module_links_data = page.evaluate("""() => {
@@ -204,7 +212,11 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
 
                 try:
                     page.goto(m_url, timeout=60000, wait_until="domcontentloaded")
-                    page.wait_for_timeout(4000)
+                    try:
+                        page.wait_for_selector('[id^="chapter-"], h3 button', timeout=15000)
+                    except Exception:
+                        logger.warning("Timeout aguardando capítulos do módulo. Tentando prosseguir...")
+                    page.wait_for_timeout(1000)
 
                     # Expandir todos os capítulos (acordeões)
                     page.evaluate("""() => {
@@ -308,6 +320,26 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
                                     "modulo": m_title,
                                     **aula_data
                                 })
+                            else:
+                                # Se o arquivo existe, verifica se está vazio ou se é apenas um esqueleto (sem transcrição e sem resumo)
+                                is_empty_or_skeleton = False
+                                try:
+                                    with open(raw_file_path, "r", encoding="utf-8") as f_raw:
+                                        raw_json_data = json.load(f_raw)
+                                        # Se for aula interna e não tiver transcrição nem resumo
+                                        if not raw_json_data.get("is_external", False):
+                                            if not raw_json_data.get("transcricao", "").strip() and not raw_json_data.get("resumo_original", "").strip():
+                                                is_empty_or_skeleton = True
+                                except Exception:
+                                    is_empty_or_skeleton = True
+
+                                if is_empty_or_skeleton:
+                                    logger.info(f"Detectado cache incompleto/esqueleto para a aula '{full_title}'. Marcando para re-extração.")
+                                    new_lessons_found.append({
+                                        "curso": course_full_name or target_course_name or "Curso",
+                                        "modulo": m_title,
+                                        **aula_data
+                                    })
 
                     if aulas:
                         scraped_modules.append({
