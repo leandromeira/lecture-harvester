@@ -3,7 +3,6 @@ import sys
 import argparse
 import time
 import random
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -15,10 +14,11 @@ from pipeline.logging_setup import setup_processing_logger
 from scraper.login import login
 from scraper.crawl_course import crawl_course
 from scraper.extract_lesson import extract_lesson
-from pipeline.summarize import process_lesson_ai
+from pipeline.ai_summarizer import process_lesson_ai
 from pipeline.enrich_attachments import enrich_attachments_for_file, enrich_attachments_for_all
 from pipeline.generate_markdown import generate_obsidian_markdown
 from pipeline.generate_module_index import generate_indexes
+from pipeline.reprocess_missing import reprocess_missing_content
 
 logger = setup_processing_logger()
 
@@ -27,7 +27,7 @@ logger = setup_processing_logger()
 RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parent / "data" / "processed"
 
-def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None, skip_enrich=False, force_markdown=False):
+def run_full_pipeline(mock=False, limit=None, use_ai=False, course_id=None, skip_enrich=False, force_markdown=False):
     """
     Executa o fluxo completo do pipeline (ETL):
     1. Sincroniza o índice do curso (sync).
@@ -76,17 +76,8 @@ def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None, ski
 
     extracted_count = 0
     if lessons_to_process:
-        workers_env = os.getenv("EXTRACTION_WORKERS", "4")
-        try:
-            workers = max(1, int(workers_env))
-        except ValueError:
-            logger.warning(f"EXTRACTION_WORKERS inválido: '{workers_env}'. Usando valor padrão 4.")
-            workers = 4
-
-        workers = min(workers, len(lessons_to_process))
-        logger.info(f"Iniciando extração paralela com {workers} worker(s)...")
-
-        def extract_one_lesson(lesson):
+        logger.info(f"Iniciando extração sequencial de {len(lessons_to_process)} aula(s)...")
+        for lesson in lessons_to_process:
             logger.info(f"Extraindo: {lesson['titulo']} do {lesson['modulo']}")
             res = extract_lesson(
                 url=lesson["url"],
@@ -94,19 +85,16 @@ def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None, ski
                 aula_titulo=lesson["titulo"],
                 slug=lesson["slug"],
                 mock=mock,
-                curso_nome=lesson.get("curso")
+                curso_nome=lesson.get("curso"),
+                subpasta=lesson.get("subpasta")
             )
+            if res:
+                extracted_count += 1
+            
             if not mock:
                 delay = random.randint(3, 7)
                 logger.info(f"Pausa anti-rate-limit: aguardando {delay} segundos...")
                 time.sleep(delay)
-            return res
-
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(extract_one_lesson, lesson) for lesson in lessons_to_process]
-            for future in as_completed(futures):
-                if future.result():
-                    extracted_count += 1
 
     # 3. Processamento & Markdown
     # Varre a pasta data/raw para encontrar arquivos não processados
@@ -125,16 +113,16 @@ def run_full_pipeline(mock=False, limit=None, skip_ai=False, course_id=None, ski
 
         # 3. Enriquece os materiais de apoio se não ignorado (Notion/GitHub)
         if not skip_enrich:
-            enrich_attachments_for_file(rf, use_ai=not skip_ai, force=False)
+            enrich_attachments_for_file(rf, use_ai=use_ai, force=False)
 
-        # Roda IA se não pulamos a etapa de IA e o arquivo processado não existir
-        if not skip_ai and not pf.exists():
+        # Roda IA se use_ai for True e o arquivo processado não existir
+        if use_ai and not pf.exists():
             success = process_lesson_ai(rf)
             if success:
                 processed_count += 1
         
         # Gera o markdown para o Obsidian
-        md_file = generate_obsidian_markdown(rf, skip_ai=skip_ai, force=force_markdown)
+        md_file = generate_obsidian_markdown(rf, use_ai=use_ai, force=force_markdown)
         if md_file:
             markdown_count += 1
 
@@ -162,6 +150,9 @@ def main():
     parser_sync.add_argument("--course-id", type=str, help="ID do curso na plataforma para sincronizar")
     parser_sync.add_argument("--list-courses", action="store_true", help="Lista os cursos disponíveis na plataforma")
     
+    # Subcomando: list-courses
+    subparsers.add_parser("list-courses", help="Lista os cursos disponíveis na plataforma")
+    
     # Subcomando: extract
     parser_extract = subparsers.add_parser("extract", help="Extrai o conteúdo de uma aula")
     parser_extract.add_argument("--url", type=str, help="URL da aula")
@@ -181,25 +172,29 @@ def main():
     parser_md = subparsers.add_parser("markdown", help="Gera arquivos markdown para o Obsidian")
     parser_md.add_argument("--file", type=str, help="Caminho do arquivo JSON bruto")
     parser_md.add_argument("--all", action="store_true", help="Gera markdown para todas as aulas no cache")
-    parser_md.add_argument("--skip-ai", action="store_true", help="Gera notas sem o conteúdo de IA (apenas resumo e transcrição)")
+    parser_md.add_argument("--use-ai", action="store_true", help="Gera notas incluindo o conteúdo processado de IA")
     parser_md.add_argument("--force", action="store_true", help="Força a regeneração de todas as notas do Obsidian")
 
     # Subcomando: attachments-enrich
     parser_att = subparsers.add_parser("attachments-enrich", help="Enriquece materiais de apoio (Notion/GitHub)")
     parser_att.add_argument("--file", type=str, help="Arquivo JSON bruto da aula")
     parser_att.add_argument("--all", action="store_true", help="Enriquece materiais de todas as aulas do cache bruto")
-    parser_att.add_argument("--no-ai", action="store_true", help="Desativa sumarização por IA no enriquecimento")
+    parser_att.add_argument("--use-ai", action="store_true", help="Ativa sumarização por IA no enriquecimento")
     parser_att.add_argument("--force", action="store_true", help="Força reprocessamento de materiais já enriquecidos")
     parser_att.add_argument("--limit", type=int, help="Limite de aulas para processar com --all")
 
     # Subcomando: index
     subparsers.add_parser("index", help="Reconstrói os índices de módulos e geral no Obsidian")
 
+    # Subcomando: reprocess
+    parser_reprocess = subparsers.add_parser("reprocess", help="Varre o vault do Obsidian por notas incompletas e as re-extrai da plataforma")
+    parser_reprocess.add_argument("--use-ai", action="store_true", help="Enriquece as notas reprocessadas usando a API de IA")
+
     # Subcomando: pipeline (Orquestração completa)
     parser_pipe = subparsers.add_parser("pipeline", help="Executa todo o pipeline (Sync -> Extract -> Process -> MD -> Index)")
     parser_pipe.add_argument("--mock", action="store_true", help="Usa dados simulados para teste (sem requisições reais à plataforma)")
     parser_pipe.add_argument("--limit", type=int, help="Limite de aulas a serem processadas nesta execução")
-    parser_pipe.add_argument("--skip-ai", action="store_true", help="Pula a etapa de enriquecimento de IA, gerando notas apenas com resumo e transcrição")
+    parser_pipe.add_argument("--use-ai", action="store_true", help="Executa a etapa de enriquecimento de IA")
     parser_pipe.add_argument("--skip-enrich", action="store_true", help="Pula a etapa de enriquecimento de materiais de apoio (Notion/GitHub)")
     parser_pipe.add_argument("--course-id", type=str, help="ID do curso na plataforma para sincronizar no pipeline")
     parser_pipe.add_argument("--force-markdown", action="store_true", help="Força a regeneração de todas as notas do Obsidian no pipeline")
@@ -224,6 +219,18 @@ def main():
                 print(f"- ID {course['id']}: {course['name']}")
         else:
             crawl_course(sync_mode=True, course_id=args.course_id)
+            
+    elif args.command == "list-courses":
+        if not login():
+            logger.error("Não foi possível autenticar para listar os cursos.")
+            sys.exit(1)
+        courses = crawl_course(sync_mode=False, list_courses=True)
+        if not courses:
+            logger.error("Nenhum curso encontrado para listagem.")
+            sys.exit(1)
+        print("\nCursos disponíveis:")
+        for course in courses:
+            print(f"- ID {course['id']}: {course['name']}")
         
     elif args.command == "extract":
         if not args.mock and not args.url:
@@ -247,21 +254,21 @@ def main():
             
     elif args.command == "markdown":
         if args.file:
-            md_file = generate_obsidian_markdown(Path(args.file), skip_ai=args.skip_ai, force=args.force)
+            md_file = generate_obsidian_markdown(Path(args.file), use_ai=args.use_ai, force=args.force)
             sys.exit(0 if md_file else 1)
         elif args.all:
             raw_files = list(RAW_DIR.glob("**/*.json"))
             raw_files = [rf for rf in raw_files if rf.name != "course_index.json"]
             count = 0
             for rf in raw_files:
-                if generate_obsidian_markdown(rf, skip_ai=args.skip_ai, force=args.force):
+                if generate_obsidian_markdown(rf, use_ai=args.use_ai, force=args.force):
                     count += 1
             logger.info(f"Concluído: {count} arquivos Markdown processados no vault.")
         else:
             parser_md.print_help()
 
     elif args.command == "attachments-enrich":
-        use_ai = not args.no_ai
+        use_ai = args.use_ai
         if args.file:
             success = enrich_attachments_for_file(Path(args.file), use_ai=use_ai, force=args.force)
             sys.exit(0 if success else 1)
@@ -276,11 +283,15 @@ def main():
         success = generate_indexes()
         sys.exit(0 if success else 1)
         
+    elif args.command == "reprocess":
+        success = reprocess_missing_content(use_ai=args.use_ai)
+        sys.exit(0 if success else 1)
+        
     elif args.command == "pipeline":
         run_full_pipeline(
             mock=args.mock,
             limit=args.limit,
-            skip_ai=args.skip_ai,
+            use_ai=args.use_ai,
             course_id=args.course_id,
             skip_enrich=args.skip_enrich,
             force_markdown=args.force_markdown

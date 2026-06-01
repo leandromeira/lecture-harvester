@@ -37,9 +37,9 @@ ATTACHMENT_KEYWORDS = (
 )
 
 def clean_filename(name):
-    """Limpador de nome de pasta/arquivo para evitar problemas no OS."""
+    """Remove caracteres inválidos para nomes de arquivos e diretórios."""
     import re
-    return re.sub(r'[^a-zA-Z0-9\s_-]', '', name).strip()
+    return re.sub(r'[\\/*?:"<>|]', '', name).strip()
 
 def should_download_material(title, url):
     """Heurística para identificar links candidatos a material de apoio."""
@@ -232,7 +232,7 @@ def get_mock_data(curso, modulo, aula, url):
         ]
     }
 
-def extract_lesson(url, modulo_nome, aula_titulo, slug, mock=False, curso_nome=None):
+def extract_lesson(url, modulo_nome, aula_titulo, slug, mock=False, curso_nome=None, subpasta=None):
     """
     Navega para a URL da aula, extrai as informações brutas
     e salva o arquivo JSON correspondente na pasta data/raw/.
@@ -241,13 +241,20 @@ def extract_lesson(url, modulo_nome, aula_titulo, slug, mock=False, curso_nome=N
     mod_clean = clean_filename(modulo_nome or "Modulo Desconhecido")
     slug_clean = clean_filename(slug or "aula_desconhecida")
     
-    output_dir = RAW_DATA_DIR / mod_clean
+    if subpasta:
+        sub_clean = clean_filename(subpasta)
+        output_dir = RAW_DATA_DIR / mod_clean / sub_clean
+    else:
+        output_dir = RAW_DATA_DIR / mod_clean
+        
     output_path = output_dir / f"{slug_clean}.json"
     attachments_dir = output_dir / "attachments" / slug_clean
 
     if mock:
         logger.info(f"[MOCK] Gerando dados fictícios para {aula_titulo}...")
         data = get_mock_data(curso, modulo_nome, aula_titulo, url)
+        if subpasta:
+            data["subpasta"] = subpasta
         output_dir.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -261,6 +268,7 @@ def extract_lesson(url, modulo_nome, aula_titulo, slug, mock=False, curso_nome=N
         data = {
             "curso": curso,
             "modulo": modulo_nome or "Geral",
+            "subpasta": subpasta or "",
             "aula": aula_titulo,
             "url": url,
             "transcricao": "",
@@ -312,26 +320,43 @@ def extract_lesson(url, modulo_nome, aula_titulo, slug, mock=False, curso_nome=N
                 title_el = page.query_selector(SELECTORS["lesson_title"])
                 extracted_title = title_el.inner_text().strip() if title_el else "Sem título"
 
-            # 1. Extrair resumo da aula
-            resumo_elms = page.query_selector_all(SELECTORS["summary_item"])
-            resumo_texts = []
-            for el in resumo_elms:
-                txt = el.inner_text().strip()
-                if txt and txt not in resumo_texts:
-                    resumo_texts.append(txt)
-
-            # Fallback robusto caso não encontre elementos p ou h2 específicos (.MuiTypography-h5)
-            if not resumo_texts:
-                fallback_elms = page.query_selector_all(".MuiTypography-h5")
-                for el in fallback_elms:
+            # 1. Extrair resumo da aula (com retries para lidar com carregamento assíncrono do React)
+            resumo_original = ""
+            for attempt in range(1, 6):
+                resumo_elms = page.query_selector_all(SELECTORS["summary_item"])
+                resumo_texts = []
+                for el in resumo_elms:
                     txt = el.inner_text().strip()
                     if txt and txt not in resumo_texts:
                         resumo_texts.append(txt)
 
-            resumo_original = "\n\n".join(resumo_texts)
+                # Fallback robusto caso não encontre elementos p ou h2 específicos (.MuiTypography-h5)
+                if not resumo_texts:
+                    fallback_elms = page.query_selector_all(".MuiTypography-h5")
+                    for el in fallback_elms:
+                        txt = el.inner_text().strip()
+                        if txt and txt not in resumo_texts:
+                            resumo_texts.append(txt)
 
-            # Fallback secundário para aulas escritas ou sem vídeo
-            if not resumo_original.strip():
+                resumo_original = "\n\n".join(resumo_texts).strip()
+                if resumo_original:
+                    logger.info(f"Resumo da aula encontrado com sucesso (tentativa {attempt}/5).")
+                    break
+
+                # No segundo attempt, tenta clicar no botão "Resumo da Aula" para garantir que a aba esteja ativa
+                if attempt == 2:
+                    try:
+                        resumo_btn = page.locator('button', has_text="Resumo da Aula")
+                        if resumo_btn.is_visible():
+                            resumo_btn.click()
+                            logger.info("Clicou no botão 'Resumo da Aula' para forçar exibição da aba.")
+                    except Exception as btn_err:
+                        logger.debug(f"Erro ao tentar clicar no botão do resumo: {btn_err}")
+
+                page.wait_for_timeout(1000)
+
+            # Fallback secundário para aulas escritas ou sem vídeo (caso persista vazio)
+            if not resumo_original:
                 main_containers = page.query_selector_all("main, article, .MuiGrid-root")
                 main_texts = []
                 for mc in main_containers:
@@ -385,6 +410,7 @@ def extract_lesson(url, modulo_nome, aula_titulo, slug, mock=False, curso_nome=N
             data = {
                 "curso": curso,
                 "modulo": modulo_nome or "Geral",
+                "subpasta": subpasta or "",
                 "aula": extracted_title,
                 "url": url,
                 "transcricao": transcricao,

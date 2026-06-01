@@ -27,30 +27,40 @@ logger.add(
 )
 
 # Criar wrappers para logs específicos de extração e processamento
+_extraction_configured = False
+_processing_configured = False
+
 def setup_extraction_logger():
     """Configura logger direcionado a logs/extraction.log"""
-    extraction_log = logs_dir / "extraction.log"
-    logger.add(
-        extraction_log,
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level:7} | {name}:{line} - {message}",
-        level="DEBUG",
-        filter=lambda record: "extraction" in record["extra"] or record["level"].name == "ERROR",
-        rotation="10 MB",
-        retention="30 days",
-        encoding="utf-8"
-    )
+    global _extraction_configured
+    if not _extraction_configured:
+        extraction_log = logs_dir / "extraction.log"
+        logger.add(
+            extraction_log,
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level:7} | {name}:{line} - {message}",
+            level="DEBUG",
+            filter=lambda record: "extraction" in record["extra"] or record["level"].name == "ERROR",
+            rotation="10 MB",
+            retention="30 days",
+            encoding="utf-8"
+        )
+        _extraction_configured = True
     return logger.bind(extraction=True)
 
 def setup_processing_logger():
     """Configura logger direcionado a logs/processing.log"""
-    processing_log = logs_dir / "processing.log"
-    logger.add(
-        processing_log,
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level:7} | {name}:{line} - {message}",
-        level="DEBUG",
-        filter=lambda record: "processing" in record["extra"] or record["level"].name == "ERROR",
-        rotation="10 MB",
-        retention="30 days",
-        encoding="utf-8"
-    )
+    global _processing_configured
+    if not _processing_configured:
+        processing_log = logs_dir / "processing.log"
+        logger.add(
+            processing_log,
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level:7} | {name}:{line} - {message}",
+            level="DEBUG",
+            filter=lambda record: "processing" in record["extra"] or record["level"].name == "ERROR",
+            rotation="10 MB",
+            retention="30 days",
+            encoding="utf-8"
+        )
+        _processing_configured = True
     return logger.bind(processing=True)
+

@@ -43,24 +43,46 @@ def generate_indexes():
     for m_dir in module_dirs:
         modulo_name = m_dir.name
         
-        # Encontra todos os arquivos markdown na pasta do módulo, exceto outros índices
-        lesson_files = []
-        for f in m_dir.glob("*.md"):
-            if f.name.startswith("00 -") or f.name.startswith("_"):
-                continue
-            lesson_files.append(f)
-            
-        # Ordena as aulas com base no número (ex: Aula 01 antes de Aula 10)
-        lesson_files.sort(key=lambda x: extract_number(x.stem))
+        # Encontra todas as subpastas (capítulos)
+        chap_dirs = sorted(
+            [d for d in m_dir.iterdir() if d.is_dir() and not d.name.startswith(".") and d.name != "attachments"],
+            key=lambda x: extract_number(x.name)
+        )
         
         # Gera o conteúdo do índice do módulo
         module_index_name = f"00 - Índice - {modulo_name}"
         module_index_file = m_dir / f"{module_index_name}.md"
         
         index_content = f"# {modulo_name}\n\n"
-        for lf in lesson_files:
-            # Obsidian wikilink: [[Nome do Arquivo]] (sem extensão)
-            index_content += f"- [[{lf.stem}]]\n"
+        module_index_lines_global = []
+
+        if chap_dirs:
+            for c_dir in chap_dirs:
+                chap_name = c_dir.name
+                
+                # Encontra arquivos md dentro do capítulo
+                lesson_files = [f for f in c_dir.glob("*.md") if not f.name.startswith("00 -") and not f.name.startswith("_")]
+                lesson_files.sort(key=lambda x: extract_number(x.stem))
+                
+                if lesson_files:
+                    index_content += f"## {chap_name}\n\n"
+                    for lf in lesson_files:
+                        rel_link = lf.relative_to(course_dir).with_suffix('')
+                        index_content += f"- [[{rel_link}|{lf.stem}]]\n"
+                        module_index_lines_global.append(f"- [[{rel_link}|{lf.stem}]]")
+                    index_content += "\n"
+        
+        # Aulas avulsas diretamente na raiz do módulo (se existirem)
+        flat_lessons = [f for f in m_dir.glob("*.md") if not f.name.startswith("00 -") and not f.name.startswith("_")]
+        flat_lessons.sort(key=lambda x: extract_number(x.stem))
+        if flat_lessons:
+            if chap_dirs:
+                index_content += "## Outros\n\n"
+            for lf in flat_lessons:
+                rel_link = lf.relative_to(course_dir).with_suffix('')
+                index_content += f"- [[{rel_link}|{lf.stem}]]\n"
+                module_index_lines_global.append(f"- [[{rel_link}|{lf.stem}]]")
+            index_content += "\n"
             
         try:
             with open(module_index_file, "w", encoding="utf-8") as f:
@@ -68,9 +90,8 @@ def generate_indexes():
             logger.info(f"Índice do módulo '{modulo_name}' gerado com sucesso!")
             
             # Adiciona linha no índice geral (apontando para o índice do módulo)
-            global_index_lines.append(f"## [[{module_index_name}|{modulo_name}]]")
-            for lf in lesson_files:
-                global_index_lines.append(f"- [[{lf.stem}]]")
+            global_index_lines.append(f"## [[{modulo_name}/{module_index_name}|{modulo_name}]]")
+            global_index_lines.extend(module_index_lines_global)
             global_index_lines.append("") # Quebra de linha
             
         except Exception as e:

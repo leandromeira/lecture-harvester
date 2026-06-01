@@ -30,6 +30,10 @@ def clean_slug(text):
     text = re.sub(r'[\s_]+', '-', text)
     return text.strip('-')
 
+def clean_filename(name):
+    """Remove caracteres inválidos para nomes de arquivos e diretórios."""
+    return re.sub(r'[\\/*?:"<>|]', '', name).strip()
+
 def extract_course_id(url):
     """Extrai o ID/slug do curso a partir da URL /courses/<id-ou-slug>."""
     match = re.search(r"/courses/([^/?#]+)", url or "")
@@ -38,23 +42,23 @@ def extract_course_id(url):
 def list_available_courses(page):
     """Lista cursos visíveis na tela inicial de cursos."""
     courses = []
-    seen_ids = set()
+    seen_urls = set()
     links = page.query_selector_all("a")
 
     for link in links:
         try:
             text = page.evaluate("(el) => el.innerText", link).strip()
             href = page.evaluate("(el) => el.href", link)
-            if not href or "/courses/" not in href or "/catalog/" in href:
+            if not href or "/courses/" not in href:
                 continue
 
             course_id = extract_course_id(href)
-            if not course_id or course_id in seen_ids:
+            if not course_id or href in seen_urls:
                 continue
 
             name = text.split("\n")[0].strip() if text else course_id
             courses.append({"id": course_id, "name": name, "url": href})
-            seen_ids.add(course_id)
+            seen_urls.add(href)
         except Exception:
             continue
 
@@ -114,6 +118,16 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
                 logger.warning("Timeout aguardando links de cursos. Tentando prosseguir...")
             page.wait_for_timeout(1000)
             logger.info(f"Página carregada. URL atual: {page.url} | Título: {page.title()}")
+
+            # Clicar em "Listar Todos" se houver
+            try:
+                listar_todos_btn = page.locator("text=Listar Todos")
+                if listar_todos_btn.count() > 0:
+                    logger.info("Botão 'Listar Todos' encontrado. Expandindo lista de cursos...")
+                    listar_todos_btn.first.click()
+                    page.wait_for_timeout(3000)
+            except Exception as e:
+                logger.warning(f"Erro ao tentar clicar em 'Listar Todos': {e}")
 
             # 2. Encontrar cursos e selecionar dinamicamente
             available_courses = list_available_courses(page)
@@ -178,9 +192,14 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
                     const text = l.innerText.trim();
                     if (href && href.includes('/conteudos') && text) {
                         const lines = text.split('\\n').map(x => x.trim()).filter(Boolean);
-                        let title = lines[0] || 'Módulo';
-                        if (lines.length > 1 && /^\\d+$/.test(lines[0])) {
-                            title = lines[1];
+                        // Filtrar badges comuns que ficam no topo do link (ex: "Novo", "Nova", "Atualizado", "Em breve")
+                        const filteredLines = lines.filter(x => {
+                            const lower = x.toLowerCase();
+                            return lower !== 'novo' && lower !== 'nova' && lower !== 'atualizado' && lower !== 'em breve';
+                        });
+                        let title = filteredLines[0] || 'Módulo';
+                        if (filteredLines.length > 1 && /^\\d+$/.test(filteredLines[0])) {
+                            title = filteredLines[1];
                         }
                         modules.push({
                             title: title,
@@ -223,7 +242,12 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
                         const buttons = document.querySelectorAll('h3 button[aria-expanded="false"]');
                         buttons.forEach(btn => btn.click());
                     }""")
-                    page.wait_for_timeout(2000)
+                    # Espera dinâmica para que pelo menos uma aula seja carregada/renderizada na tela
+                    try:
+                        page.wait_for_selector('[id^="list-content-"]', timeout=10000)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(2000)  # Tempo adicional para garantir renderização de todo o lote
 
                     chapters = page.evaluate("""() => {
                         const results = [];
@@ -279,9 +303,10 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
                     parts = m_url.rstrip("/").split("/")
                     modulo_id = parts[-2] if len(parts) >= 2 else ""
 
-                    for chap in chapters:
+                    for chap_idx, chap in enumerate(chapters):
                         chap_title = chap["chapterTitle"]
-                        for lesson in chap["lessons"]:
+                        chap_folder = f"{chap_idx + 1:02d} - {chap_title}" if chap_title else ""
+                        for lesson_idx, lesson in enumerate(chap["lessons"]):
                             lesson_title = lesson["title"]
                             lesson_id = lesson["id"]
                             is_external = lesson.get("is_external", False)
@@ -295,11 +320,11 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
                                 
                             lesson_slug = clean_slug(lesson_title)
                             
-                            # Título composto: Capítulo - Aula
-                            full_title = f"{chap_title} - {lesson_title}" if chap_title else lesson_title
+                            # Título numerado: ex: "01 - Introdução"
+                            numbered_title = f"{lesson_idx + 1:02d} - {lesson_title}"
                             
                             aula_data = {
-                                "titulo": full_title,
+                                "titulo": numbered_title,
                                 "url": lesson_url,
                                 "slug": lesson_slug
                             }
@@ -307,12 +332,19 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
                                 aula_data["is_external"] = True
                                 aula_data["external_url"] = external_url
                                 
+                            if chap_folder:
+                                aula_data["subpasta"] = chap_folder
+                                
                             aulas.append(aula_data)
                             
                             # Verifica se o arquivo JSON bruto correspondente já existe fisicamente no disco
                             raw_dir = INDEX_PATH.parent
                             mod_clean = re.sub(r'[^a-zA-Z0-9\s_-]', '', m_title or "").strip()
-                            raw_file_path = raw_dir / mod_clean / f"{lesson_slug}.json"
+                            if chap_folder:
+                                chap_clean = clean_filename(chap_folder)
+                                raw_file_path = raw_dir / mod_clean / chap_clean / f"{lesson_slug}.json"
+                            else:
+                                raw_file_path = raw_dir / mod_clean / f"{lesson_slug}.json"
                             
                             if lesson_url not in existing_urls or not raw_file_path.exists():
                                 new_lessons_found.append({
@@ -334,7 +366,7 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
                                     is_empty_or_skeleton = True
 
                                 if is_empty_or_skeleton:
-                                    logger.info(f"Detectado cache incompleto/esqueleto para a aula '{full_title}'. Marcando para re-extração.")
+                                    logger.info(f"Detectado cache incompleto/esqueleto para a aula '{numbered_title}'. Marcando para re-extração.")
                                     new_lessons_found.append({
                                         "curso": course_full_name or target_course_name or "Curso",
                                         "modulo": m_title,

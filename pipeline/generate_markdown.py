@@ -60,7 +60,7 @@ def build_materials_markdown(raw_data: dict) -> str:
 def build_markdown_content(raw_data: dict, processed_data: dict = None) -> str:
     """Monta a estrutura de markdown para o Obsidian conforme o template."""
     aula_titulo = raw_data.get("aula", "Sem Título")
-    resumo_original = raw_data.get("resumo_original", "Sem resumo na plataforma.")
+    resumo_original = raw_data.get("resumo_original", "").strip() or "Sem resumo na plataforma."
     transcricao = raw_data.get("transcricao", "")
     materiais_md = build_materials_markdown(raw_data)
     
@@ -227,9 +227,9 @@ def sync_attachments_to_obsidian(raw_data: dict, obsidian_dir: Path):
             if not target_path.exists():
                 shutil.copy2(source_path, target_path)
 
-def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = None, skip_ai=False, force=False) -> Path:
+def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = None, use_ai=False, force=False) -> Path:
     """
-    Lê o JSON bruto (e o JSON processado de IA se não for skip_ai e existir) e gera o arquivo
+    Lê o JSON bruto (e o JSON processado de IA se use_ai for True e existir) e gera o arquivo
     Markdown dentro do Vault do Obsidian definido nas configurações.
     Evita regerar se os arquivos de destino já existirem e forem mais novos que as entradas,
     a menos que force=True.
@@ -242,10 +242,10 @@ def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = 
     with open(raw_json_path, "r", encoding="utf-8") as f:
         raw_data = json.load(f)
 
-    # Tenta carregar dados processados pela IA se não ignorarmos a IA e o arquivo existir
+    # Tenta carregar dados processados pela IA se use_ai for True e o arquivo existir
     processed_data = None
     processed_json_path_resolved = None
-    if not skip_ai:
+    if use_ai:
         if processed_json_path and processed_json_path.exists():
             processed_json_path_resolved = processed_json_path
             try:
@@ -270,18 +270,23 @@ def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = 
     course_name = raw_data.get("curso") or os.getenv("COURSE_NAME", "MBA em Engenharia de Software com IA")
     
     modulo_original = raw_data.get("modulo", "Geral")
-    # Limpa nomes para pasta
     modulo_clean = clean_filename(modulo_original)
+    
+    subpasta_original = raw_data.get("subpasta", "")
+    subpasta_clean = clean_filename(subpasta_original) if subpasta_original else ""
     
     # Nome do arquivo da aula no Obsidian (ex: Aula 03 - Prompt Engineering.md)
     aula_titulo = raw_data.get("aula", "Sem Título")
     aula_clean = clean_filename(aula_titulo)
     
-    obsidian_dir = vault_path / course_name / modulo_clean
+    if subpasta_clean:
+        obsidian_dir = vault_path / course_name / modulo_clean / subpasta_clean
+        local_md_dir = Path(__file__).resolve().parents[1] / "data" / "markdown" / modulo_clean / subpasta_clean
+    else:
+        obsidian_dir = vault_path / course_name / modulo_clean
+        local_md_dir = Path(__file__).resolve().parents[1] / "data" / "markdown" / modulo_clean
+        
     obsidian_file_path = obsidian_dir / f"{aula_clean}.md"
-    
-    # Caminho local do cache do markdown
-    local_md_dir = Path(__file__).resolve().parents[1] / "data" / "markdown" / modulo_clean
     local_md_file_path = local_md_dir / f"{aula_clean}.md"
 
     # Verificação incremental de modificação

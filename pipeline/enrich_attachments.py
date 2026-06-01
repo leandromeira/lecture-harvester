@@ -14,7 +14,7 @@ from playwright.sync_api import sync_playwright
 load_dotenv()
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from pipeline.logging_setup import setup_processing_logger
-from pipeline.summarize import get_ai_client, call_ai, extract_json_block
+from pipeline.ai_summarizer import get_ai_client, call_ai, extract_json_block
 
 logger = setup_processing_logger()
 
@@ -26,8 +26,13 @@ STATE_PATH = PROJECT_ROOT / "config" / "storage_state.json"
 
 def clean_name(value: str) -> str:
     import re
+    import unicodedata
     value = value or "material"
+    # Normalizar caracteres acentuados para suas formas base em ASCII
+    value = unicodedata.normalize('NFKD', value).encode('ASCII', 'ignore').decode('ASCII')
     cleaned = re.sub(r"[^a-zA-Z0-9._-]", "-", value).strip("-")
+    # Remover múltiplos hifens consecutivos
+    cleaned = re.sub(r"-+", "-", cleaned)
     return cleaned or "material"
 
 
@@ -148,59 +153,269 @@ def enrich_github_material(material: dict, use_ai: bool, force: bool) -> dict:
 
 def enrich_notion_material(material: dict, use_ai: bool) -> dict:
     url = material.get("url", "")
-    slug = clean_name(material.get("titulo", "notion"))
-    out_dir = ENRICHED_DIR / "notion"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    snapshot_file = out_dir / f"{slug}.txt"
-
+    main_title = material.get("titulo", "notion")
+    main_slug = clean_name(main_title)
+    
+    # Pasta isolada para o material do Notion e suas subpáginas
+    material_dir = ENRICHED_DIR / "notion" / main_slug
+    material_dir.mkdir(parents=True, exist_ok=True)
+    
     if not STATE_PATH.exists():
         material["status"] = "erro_enriquecimento"
         material["erro_enriquecimento"] = "Sessão Playwright indisponível para capturar página Notion."
         return material
 
-    page_text = ""
+    # Extrair ID da URL
+    def extract_notion_id(u: str) -> str:
+        parsed = urlparse(u)
+        path = parsed.path
+        match = re.search(r'([a-fA-F0-9]{32})$', path.replace('-', ''))
+        if match:
+            return match.group(1).lower()
+        return re.sub(r'[^a-zA-Z0-9]', '', path).lower()
+
+    # Rastrear URLs crawled para evitar loops e mapear URLs de Notion para nomes de arquivos locais
+    crawled_urls = {} # map: page_id -> local_slug
+    local_artifacts = []
+    
+    # Fila de URLs para processar: list of (url, depth, is_main)
+    queue = [(url, 1, True)]
+    visited_ids = set()
+    
+    # Lista de páginas com conteúdo convertido e seus links internos para processamento posterior
+    pages_to_write = [] # list of dict: {"id": page_id, "slug": local_slug, "title": title, "markdown_raw": markdown, "links": [...], "is_main": is_main}
+    
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true")
-            try:
-                context = browser.new_context(storage_state=str(STATE_PATH))
-                page = context.new_page()
-                page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            context = browser.new_context(storage_state=str(STATE_PATH))
+            
+            while queue:
+                current_url, depth, is_main = queue.pop(0)
+                page_id = extract_notion_id(current_url)
+                if page_id in visited_ids:
+                    continue
+                visited_ids.add(page_id)
                 
-                # Aguarda renderização completa do Notion
-                page.wait_for_timeout(6000)
-                
-                # Extrair título e conteúdo limpos do Notion
-                extracted = page.evaluate("""() => {
-                    const titleEl = document.querySelector('.notion-page-block h1, h1.notion-page-title, .notion-title-block, .notion-page-controls + div');
-                    let title = titleEl ? titleEl.innerText.trim() : '';
-                    if (!title) {
-                        title = document.title || 'Sem Título';
-                    }
+                # Se for maior que profundidade 2, não crawlamos mais subpáginas
+                if depth > 2:
+                    continue
                     
-                    const contentEl = document.querySelector('.notion-page-content');
-                    const content = contentEl ? contentEl.innerText.trim() : '';
+                logger.info(f"Crawling Notion [{depth}]: {current_url}")
+                sub_page = context.new_page()
+                try:
+                    sub_page.goto(current_url, timeout=20000, wait_until="commit")
+                    sub_page.wait_for_timeout(6000)
                     
-                    return { title, content };
-                }""")
-                
-                title = extracted.get("title", "Sem Título")
-                page_text = f"Título: {title}\n\nConteúdo:\n{extracted.get('content', '')}"
-            finally:
-                browser.close()
+                    # Extrair título, Markdown parcial e links internos
+                    extracted = sub_page.evaluate("""() => {
+                        const contentEl = document.querySelector('.notion-page-content') || document.querySelector('.notion-selectable')?.parentElement;
+                        if (!contentEl) return null;
+
+                        const titleEl = document.querySelector('.notion-page-block h1, h1.notion-page-title, .notion-title-block, .notion-page-controls + div');
+                        const title = titleEl ? titleEl.innerText.trim() : document.title || 'Sem Título';
+
+                        // Coletar links internos do Notion
+                        const internalLinks = [];
+                        const anchors = Array.from(contentEl.querySelectorAll('a[href]'));
+                        anchors.forEach(a => {
+                            const href = a.href;
+                            if (href && (href.includes('notion.so') || href.includes('notion.site')) && !href.includes('image')) {
+                                internalLinks.push({
+                                    text: a.innerText.trim(),
+                                    href: href
+                                });
+                            }
+                        });
+
+                        function convertNodeToMarkdown(node) {
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                return node.textContent;
+                            }
+                            if (node.nodeType !== Node.ELEMENT_NODE) {
+                                return '';
+                            }
+
+                            const tagName = node.tagName.toLowerCase();
+                            const classes = Array.from(node.classList);
+
+                            // Se for link
+                            if (tagName === 'a' && node.getAttribute('href')) {
+                                const href = node.href;
+                                const text = node.innerText.trim() || 'Link';
+                                if (href.includes('notion.so') || href.includes('notion.site')) {
+                                    return `[NOTION_LINK:${href}][${text}]`;
+                                }
+                                return `[${text}](${href})`;
+                            }
+
+                            // Formatações básicas
+                            if (tagName === 'strong' || tagName === 'b' || node.style.fontWeight === 'bold') {
+                                return `**${Array.from(node.childNodes).map(convertNodeToMarkdown).join('')}**`;
+                            }
+                            if (tagName === 'em' || tagName === 'i' || node.style.fontStyle === 'italic') {
+                                return `*${Array.from(node.childNodes).map(convertNodeToMarkdown).join('')}*`;
+                            }
+                            if (tagName === 'code') {
+                                return `\`${node.innerText}\``;
+                            }
+
+                            // Blocos estruturais do Notion
+                            if (classes.includes('notion-bulleted_list-block')) {
+                                return `* ${Array.from(node.childNodes).map(convertNodeToMarkdown).join('').trim()}\n`;
+                            }
+                            if (classes.includes('notion-numbered_list-block')) {
+                                return `1. ${Array.from(node.childNodes).map(convertNodeToMarkdown).join('').trim()}\n`;
+                            }
+                            if (classes.includes('notion-to_do-block')) {
+                                const checked = node.querySelector('input[type="checkbox"]') ? node.querySelector('input[type="checkbox"]').checked : false;
+                                return `- [${checked ? 'x' : ' '}] ${Array.from(node.childNodes).map(convertNodeToMarkdown).join('').trim()}\n`;
+                            }
+                            if (classes.includes('notion-code-block')) {
+                                const codeEl = node.querySelector('code');
+                                const codeText = codeEl ? codeEl.innerText : node.innerText;
+                                return `\`\`\`\\n${codeText.trim()}\\n\`\`\`\\n\\n`;
+                            }
+                            if (classes.includes('notion-quote-block')) {
+                                return `> ${Array.from(node.childNodes).map(convertNodeToMarkdown).join('').trim()}\n\n`;
+                            }
+                            if (classes.includes('notion-callout-block')) {
+                                return `> [!NOTE]\\n> ${Array.from(node.childNodes).map(convertNodeToMarkdown).join('').trim().replace(/\\n/g, '\\n> ')}\n\n`;
+                            }
+                            if (classes.includes('notion-divider-block')) {
+                                return `---\n\n`;
+                            }
+                            if (classes.includes('notion-header-block')) {
+                                return `\\n# ${Array.from(node.childNodes).map(convertNodeToMarkdown).join('').trim()}\\n\\n`;
+                            }
+                            if (classes.includes('notion-sub_header-block')) {
+                                return `\\n## ${Array.from(node.childNodes).map(convertNodeToMarkdown).join('').trim()}\\n\\n`;
+                            }
+                            if (classes.includes('notion-sub_sub_header-block')) {
+                                return `\\n### ${Array.from(node.childNodes).map(convertNodeToMarkdown).join('').trim()}\\n\\n`;
+                            }
+                            if (classes.includes('notion-page-block')) {
+                                const a = node.querySelector('a[href]');
+                                if (a) {
+                                    const href = a.href;
+                                    const text = a.innerText.trim() || node.innerText.trim();
+                                    return `\\n* **Página:** [NOTION_LINK:${href}][${text}]\\n`;
+                                }
+                                return `\\n* **Página:** ${node.innerText.trim()}\\n`;
+                            }
+
+                            if (tagName === 'div' && classes.some(c => c.startsWith('notion-'))) {
+                                return Array.from(node.childNodes).map(convertNodeToMarkdown).join('') + '\\n';
+                            }
+
+                            return Array.from(node.childNodes).map(convertNodeToMarkdown).join('');
+                        }
+
+                        const blocks = Array.from(contentEl.children);
+                        let markdown = blocks.map(convertNodeToMarkdown).join('\\n');
+                        markdown = markdown.replace(/\\n{3,}/g, '\\n\\n');
+
+                        return { title, markdown, links: internalLinks };
+                    }""")
+                    
+                    if not extracted:
+                        logger.warning(f"Não foi possível obter conteúdo para a página Notion: {current_url}")
+                        continue
+                        
+                    title = extracted.get("title", "Sem Título")
+                    markdown = extracted.get("markdown", "")
+                    links = extracted.get("links", [])
+                    
+                    # Definir slug local
+                    if is_main:
+                        local_slug = main_slug
+                    else:
+                        local_slug = clean_name(title)
+                        # Evitar conflitos de nomes duplicados
+                        base_slug = local_slug
+                        counter = 2
+                        while any(p["slug"] == local_slug for p in pages_to_write):
+                            local_slug = f"{base_slug}-{counter}"
+                            counter += 1
+                            
+                    crawled_urls[page_id] = local_slug
+                    pages_to_write.append({
+                        "id": page_id,
+                        "slug": local_slug,
+                        "title": title,
+                        "markdown_raw": markdown,
+                        "links": links,
+                        "is_main": is_main
+                    })
+                    
+                    # Adicionar novos links descobertos à fila (se profundidade permitir)
+                    if depth < 2:
+                        for l in links:
+                            link_url = l["href"]
+                            link_id = extract_notion_id(link_url)
+                            if link_id not in visited_ids:
+                                queue.append((link_url, depth + 1, False))
+                                
+                except Exception as page_err:
+                    logger.warning(f"Erro ao processar página Notion {current_url}: {page_err}")
+                finally:
+                    sub_page.close()
+                    
+            browser.close()
+            
     except Exception as e:
-        logger.warning(f"Erro ao capturar conteúdo Notion '{url}': {e}")
+        logger.warning(f"Erro na execução geral do Playwright para o Notion '{url}': {e}")
         material["status"] = "erro_enriquecimento"
         material["erro_enriquecimento"] = str(e)
         return material
 
-    snapshot_file.write_text(page_text or "", encoding="utf-8")
-    
-    # Desativado resumo de IA para Notion conforme solicitado
-    ai_data = {"resumo": "", "pontos_chave": []}
+    if not pages_to_write:
+        material["status"] = "erro_enriquecimento"
+        material["erro_enriquecimento"] = "Nenhuma página Notion foi capturada com sucesso."
+        return material
 
-    material["artefatos_locais"] = [to_relative(snapshot_file)]
+    # Segunda passada em Python: resolver e reescrever links internos
+    for page_data in pages_to_write:
+        md = page_data["markdown_raw"]
+        
+        # Encontrar todas as marcações [NOTION_LINK:url][texto]
+        # e substituir por [[local_slug|texto]] se a URL estiver no crawled_urls
+        def replace_notion_link(match):
+            link_url = match.group(1)
+            link_text = match.group(2)
+            link_id = extract_notion_id(link_url)
+            
+            if link_id in crawled_urls:
+                slug_dest = crawled_urls[link_id]
+                return f"[[{slug_dest}|{link_text}]]"
+            else:
+                # Se não foi crawled (por limite de profundidade, etc.), manter como link externo normal
+                return f"[{link_text}]({link_url})"
+                
+        md_resolved = re.sub(r'\[NOTION_LINK:([^\]]+)\]\[([^\]]+)\]', replace_notion_link, md)
+        
+        # Formatar cabeçalho
+        title = page_data["title"]
+        final_md = f"# {title}\n\n{md_resolved}"
+        
+        # Salvar nota localmente
+        out_file = material_dir / f"{page_data['slug']}.md"
+        out_file.write_text(final_md, encoding="utf-8")
+        
+        # Adicionar à lista de artefatos
+        relative_path = to_relative(out_file)
+        local_artifacts.append(relative_path)
+        
+        # Se for a página principal, salvar a referência em material
+        if page_data["is_main"]:
+            material["arquivo_local"] = relative_path
+
+    # Atualizar metadados do material
+    material["artefatos_locais"] = local_artifacts
     material["status"] = "enriquecido"
+    material["baixado"] = True
+    
+    ai_data = {"resumo": "", "pontos_chave": []}
     material["enriquecimento"] = {
         "tipo": "notion_page",
         "resumo": ai_data.get("resumo", ""),
@@ -299,7 +514,7 @@ def download_google_drive_material(material: dict, attachments_dir: Path) -> dic
     return material
 
 
-def enrich_attachments_for_file(raw_json_path: Path, use_ai: bool = True, force: bool = False) -> bool:
+def enrich_attachments_for_file(raw_json_path: Path, use_ai: bool = False, force: bool = False) -> bool:
     if not raw_json_path.exists():
         logger.error(f"Arquivo não encontrado para enriquecimento: {raw_json_path}")
         return False
@@ -344,7 +559,7 @@ def enrich_attachments_for_file(raw_json_path: Path, use_ai: bool = True, force:
     return True
 
 
-def enrich_attachments_for_all(use_ai: bool = True, force: bool = False, limit: int = None):
+def enrich_attachments_for_all(use_ai: bool = False, force: bool = False, limit: int = None):
     raw_files = [f for f in RAW_DATA_DIR.glob("**/*.json") if f.name != "course_index.json"]
     if limit:
         raw_files = raw_files[:limit]
@@ -363,12 +578,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Enriquece materiais de apoio (Notion/GitHub) das aulas extraídas.")
     parser.add_argument("--file", type=str, help="Arquivo JSON bruto da aula para enriquecer.")
     parser.add_argument("--all", action="store_true", help="Enriquecer todas as aulas do cache bruto.")
-    parser.add_argument("--no-ai", action="store_true", help="Executa enriquecimento sem sumarização por IA.")
+    parser.add_argument("--use-ai", action="store_true", help="Executa enriquecimento com sumarização por IA.")
     parser.add_argument("--force", action="store_true", help="Força reprocessamento dos materiais já enriquecidos.")
     parser.add_argument("--limit", type=int, help="Limite de arquivos para processar com --all.")
     args = parser.parse_args()
 
-    use_ai = not args.no_ai
+    use_ai = args.use_ai
     if args.file:
         ok = enrich_attachments_for_file(Path(args.file), use_ai=use_ai, force=args.force)
         sys.exit(0 if ok else 1)
