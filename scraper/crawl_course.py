@@ -218,16 +218,19 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
             scraped_modules = []
 
             # 4. Para cada módulo, navegar até a página /conteudos e extrair os capítulos e aulas
+            active_m_idx = 1
             for m_idx, m_data in enumerate(module_links_data):
-                m_title = m_data["title"]
+                m_raw_title = m_data["title"]
                 m_url = m_data["url"]
                 
                 # Verificar se o módulo deve ser ignorado
-                if any(ignored in m_title.lower() for ignored in ignore_modules):
-                    logger.info(f"Módulo [{m_idx + 1}/{len(module_links_data)}]: '{m_title}' ignorado (conforme IGNORE_MODULES no .env).")
+                if any(ignored in m_raw_title.lower() for ignored in ignore_modules):
+                    logger.info(f"Módulo [{m_idx + 1}/{len(module_links_data)}]: '{m_raw_title}' ignorado (conforme IGNORE_MODULES no .env).")
                     continue
 
-                logger.info(f"Processando módulo [{m_idx + 1}/{len(module_links_data)}]: '{m_title}'")
+                m_title = f"{active_m_idx:02d} - {m_raw_title}"
+                active_m_idx += 1
+                logger.info(f"Processando módulo [{m_idx}/{len(module_links_data)}]: '{m_title}'")
 
                 try:
                     page.goto(m_url, timeout=60000, wait_until="domcontentloaded")
