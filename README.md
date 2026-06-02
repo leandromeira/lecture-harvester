@@ -7,6 +7,7 @@
 ![Obsidian Compatibility](https://img.shields.io/badge/Obsidian-Ready-8B6DDF?logo=obsidian&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Donate-FFDD00?logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/leandromeira)
 
 </div>
 
