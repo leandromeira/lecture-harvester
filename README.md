@@ -116,11 +116,10 @@ venv/bin/python main.py pipeline [flags]
   * `--force-markdown`: Força a regeneração de todas as notas do Obsidian, mesmo que os dados brutos de entrada não tenham sido alterados.
 
 ### 2. `login` (Autenticação manual/forçada)
+Abre uma nova janela headed do navegador para realizar o login manual e atualizar os cookies de sessão de forma segura.
 ```bash
-venv/bin/python main.py login [flags]
+venv/bin/python main.py login
 ```
-* **Flags Opcionais:**
-  * `--force`: Ignora qualquer sessão anterior e força a abertura de uma nova janela headed para login.
 
 ### 3. `list-courses` (Listar Cursos)
 Lista todos os cursos disponíveis na sua conta com seus respectivos IDs (útil para descobrir o `course-id` de um curso).
@@ -227,9 +226,9 @@ Campos monitorados:
 
 ### 3. E se não veio algum anexo específico?
 1. Force a re-extração do anexo da aula:
-   `venv/bin/python main.py attachments-enrich --file "data/raw/Modulo/aula.json" --force`
+   `venv/bin/python main.py attachments-enrich --file "data/raw/XX - Nome do Módulo/YY - Capítulo/aula.json" --force`
 2. Force a regeração da nota Markdown correspondente:
-   `venv/bin/python main.py markdown --file "data/raw/Modulo/aula.json" --force`
+   `venv/bin/python main.py markdown --file "data/raw/XX - Nome do Módulo/YY - Capítulo/aula.json" --force`
 
 ### 4. Como sincronizar novas aulas lançadas no curso?
 Rode novamente o pipeline principal. Ele detectará apenas as novas aulas inseridas na plataforma e fará o download incremental:
