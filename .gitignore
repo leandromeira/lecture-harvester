@@ -41,3 +41,4 @@ ehthumbs.db
 
 # Agent skills and tools dependencies
 .agents/
+skills-lock.json
