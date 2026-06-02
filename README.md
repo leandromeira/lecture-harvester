@@ -1,5 +1,17 @@
 # Lecture Harvester Scraper
 
+<div align="center">
+
+![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+![Playwright Version](https://img.shields.io/badge/playwright-%E2%9C%93-2EAD5C?logo=playwright&logoColor=white)
+![Obsidian Compatibility](https://img.shields.io/badge/Obsidian-Ready-8B6DDF?logo=obsidian&logoColor=white)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
+
+</div>
+
+---
+
 O **Lecture Harvester** é um pipeline de ETL automatizado em **Python** e **Playwright** para extrair, processar e organizar aulas e materiais de apoio da plataforma de ensino Full Cycle, convertendo-os em notas de estudo estruturadas no **Obsidian**.
 
 ---
