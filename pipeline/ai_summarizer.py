@@ -45,12 +45,18 @@ def extract_json_block(text: str) -> dict:
 
 def get_ai_client(provider: str):
     """Inicializa o cliente do SDK correspondente."""
-    if provider == "openai":
+    if provider in {"openai", "openrouter"}:
         from openai import OpenAI
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key_env = "OPENAI_API_KEY" if provider == "openai" else "OPENROUTER_API_KEY"
+        api_key = os.getenv(api_key_env)
         if not api_key:
-            raise ValueError("OPENAI_API_KEY não definida no ambiente.")
-        return OpenAI(api_key=api_key)
+            raise ValueError(f"{api_key_env} não definida no ambiente.")
+
+        client_kwargs = {"api_key": api_key}
+        if provider == "openrouter":
+            client_kwargs["base_url"] = "https://openrouter.ai/api/v1"
+
+        return OpenAI(**client_kwargs)
         
     elif provider == "anthropic":
         from anthropic import Anthropic
@@ -69,6 +75,18 @@ def get_ai_client(provider: str):
     else:
         raise ValueError(f"Provedor '{provider}' não suportado.")
 
+
+def _call_openai_compatible_chat_completion(client, model: str, prompt: str, temperature: float):
+    return client.chat.completions.create(
+        model=model,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": "Você é um assistente especializado em formatação JSON. Sempre responda em formato JSON válido."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=temperature
+    )
+
 def call_ai(provider: str, model: str, prompt: str, client, temperature: float = 0.2, call_context: str = "unknown") -> str:
     """Faz a chamada da API do provedor selecionado de forma direta usando o SDK, com retry automático e backoff exponencial."""
     max_retries = 5
@@ -78,16 +96,8 @@ def call_ai(provider: str, model: str, prompt: str, client, temperature: float =
         try:
             logger.debug(f"Fazendo chamada de IA ({provider} - {model} com temperatura {temperature}), tentativa {attempt}/{max_retries}...")
             
-            if provider == "openai":
-                response = client.chat.completions.create(
-                    model=model,
-                    response_format={"type": "json_object"},
-                    messages=[
-                        {"role": "system", "content": "Você é um assistente especializado em formatação JSON. Sempre responda em formato JSON válido."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=temperature
-                )
+            if provider in {"openai", "openrouter"}:
+                response = _call_openai_compatible_chat_completion(client, model, prompt, temperature)
                 log_cost_event(provider, model, call_context, response=response, status="success")
                 return response.choices[0].message.content
                 
