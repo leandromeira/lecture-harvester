@@ -12,6 +12,8 @@ _MODEL_PRICING_USD_PER_1K = {
         "gpt-4o": (0.0050, 0.0150),
         "gpt-4o-mini": (0.00015, 0.00060),
         "gpt-4.1": (0.0020, 0.0080),
+        "gpt-4.1-mini": (0.00040, 0.00160),
+        "gpt-4.1-nano": (0.00010, 0.00040),
     },
     "anthropic": {
         "claude-3-5-sonnet": (0.0030, 0.0150),
@@ -24,6 +26,7 @@ _MODEL_PRICING_USD_PER_1K = {
         "gemini-2.0-flash": (0.00010, 0.00040),
     },
 }
+_OPENAI_COMPATIBLE_USAGE_PROVIDERS = {"openai", "openrouter"}
 
 
 def _as_int(value, default=0):
@@ -66,7 +69,7 @@ def _resolve_pricing(provider: str, model: str):
     if model_key in provider_prices:
         return provider_prices[model_key]
 
-    for key, prices in provider_prices.items():
+    for key, prices in sorted(provider_prices.items(), key=lambda item: len(item[0]), reverse=True):
         if model_key.startswith(key):
             return prices
 
@@ -80,7 +83,7 @@ def _extract_usage(provider: str, response):
     provider_key = (provider or "").lower()
     usage = getattr(response, "usage", None)
 
-    if provider_key in {"openai", "openrouter"}:
+    if provider_key in _OPENAI_COMPATIBLE_USAGE_PROVIDERS:
         input_tokens = _as_int(_read_field(usage, "prompt_tokens", 0))
         output_tokens = _as_int(_read_field(usage, "completion_tokens", 0))
         total_tokens = _as_int(_read_field(usage, "total_tokens", input_tokens + output_tokens))
