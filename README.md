@@ -54,7 +54,7 @@ O **Lecture Harvester** é um pipeline de ETL automatizado em **Python** e **Pla
    # Integração com Obsidian
    OBSIDIAN_VAULT_PATH=
 
-   # Configurações de IA (openai, anthropic ou gemini)
+   # Configurações de IA (openai, anthropic, gemini ou openrouter)
    AI_PROVIDER=openai
    AI_MODEL=gpt-4o
    AI_TEMPERATURE=0.2
@@ -63,12 +63,22 @@ O **Lecture Harvester** é um pipeline de ETL automatizado em **Python** e **Pla
    OPENAI_API_KEY=sua-chave-openai
    GEMINI_API_KEY=sua-chave-gemini
    ANTHROPIC_API_KEY=sua-chave-anthropic
+   OPENROUTER_API_KEY=sua-chave-openrouter
 
    # Configurações de Execução do Scraper
    MAX_LESSONS_PER_RUN=10
    PLAYWRIGHT_HEADLESS=true
    PLAYWRIGHT_TIMEOUT=30000
    ```
+
+   Exemplo mínimo com OpenRouter:
+   ```env
+   AI_PROVIDER=openrouter
+   AI_MODEL=openai/gpt-4o-mini
+   OPENROUTER_API_KEY=sua-chave-openrouter
+   ```
+
+   Observação: no OpenRouter, o valor de `AI_MODEL` deve seguir o identificador aceito pelo catálogo do próprio OpenRouter.
 
 ---
 
@@ -204,6 +214,8 @@ venv/bin/python main.py reprocess [flags]
 Toda chamada de IA (pipeline de resumos e enriquecimento de anexos) é auditada. O consumo detalhado é salvo em:
 - `logs/cost_tracker.csv`
 
+Para `openrouter`, o custo total é aproveitado diretamente do retorno da API quando esse dado vier disponível.
+
 Campos monitorados:
 - `timestamp_utc`, `provider`, `model`, `call_context`, `status`
 - `input_tokens`, `output_tokens`, `total_tokens`
@@ -233,4 +245,3 @@ Campos monitorados:
 ### 4. Como sincronizar novas aulas lançadas no curso?
 Rode novamente o pipeline principal. Ele detectará apenas as novas aulas inseridas na plataforma e fará o download incremental:
 `venv/bin/python main.py pipeline` (ou com `--use-ai`).
-

@@ -21,6 +21,18 @@ logger = setup_processing_logger()
 
 PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 PROCESSED_DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
+_OPENAI_COMPATIBLE_PROVIDERS = {
+    "openai": {
+        "api_key_env": "OPENAI_API_KEY",
+        "client_kwargs": {},
+    },
+    "openrouter": {
+        "api_key_env": "OPENROUTER_API_KEY",
+        "client_kwargs": {
+            "base_url": "https://openrouter.ai/api/v1",
+        },
+    },
+}
 
 def extract_json_block(text: str) -> dict:
     """Extrai e valida um bloco JSON de uma resposta de texto da IA."""
@@ -45,21 +57,31 @@ def extract_json_block(text: str) -> dict:
 
 def get_ai_client(provider: str):
     """Inicializa o cliente do SDK correspondente."""
-    if provider == "openai":
+    provider_key = (provider or "").lower()
+
+    if provider_key in _OPENAI_COMPATIBLE_PROVIDERS:
         from openai import OpenAI
-        api_key = os.getenv("OPENAI_API_KEY")
+        provider_config = _OPENAI_COMPATIBLE_PROVIDERS[provider_key]
+        api_key_env = provider_config["api_key_env"]
+        api_key = os.getenv(api_key_env)
         if not api_key:
-            raise ValueError("OPENAI_API_KEY não definida no ambiente.")
-        return OpenAI(api_key=api_key)
+            raise ValueError(f"{api_key_env} não definida no ambiente.")
+
+        client_kwargs = {
+            "api_key": api_key,
+            **provider_config.get("client_kwargs", {}),
+        }
+
+        return OpenAI(**client_kwargs)
         
-    elif provider == "anthropic":
+    elif provider_key == "anthropic":
         from anthropic import Anthropic
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY não definida no ambiente.")
         return Anthropic(api_key=api_key)
         
-    elif provider == "gemini":
+    elif provider_key == "gemini":
         from google import genai
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
@@ -69,29 +91,34 @@ def get_ai_client(provider: str):
     else:
         raise ValueError(f"Provedor '{provider}' não suportado.")
 
+
+def _call_openai_compatible_chat_completion(client, model: str, prompt: str, temperature: float):
+    return client.chat.completions.create(
+        model=model,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": "Você é um assistente especializado em formatação JSON. Sempre responda em formato JSON válido."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=temperature
+    )
+
 def call_ai(provider: str, model: str, prompt: str, client, temperature: float = 0.2, call_context: str = "unknown") -> str:
     """Faz a chamada da API do provedor selecionado de forma direta usando o SDK, com retry automático e backoff exponencial."""
     max_retries = 5
     base_delay = 2.0
+    provider_key = (provider or "").lower()
 
     for attempt in range(1, max_retries + 1):
         try:
             logger.debug(f"Fazendo chamada de IA ({provider} - {model} com temperatura {temperature}), tentativa {attempt}/{max_retries}...")
             
-            if provider == "openai":
-                response = client.chat.completions.create(
-                    model=model,
-                    response_format={"type": "json_object"},
-                    messages=[
-                        {"role": "system", "content": "Você é um assistente especializado em formatação JSON. Sempre responda em formato JSON válido."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=temperature
-                )
+            if provider_key in _OPENAI_COMPATIBLE_PROVIDERS:
+                response = _call_openai_compatible_chat_completion(client, model, prompt, temperature)
                 log_cost_event(provider, model, call_context, response=response, status="success")
                 return response.choices[0].message.content
                 
-            elif provider == "anthropic":
+            elif provider_key == "anthropic":
                 response = client.messages.create(
                     model=model,
                     max_tokens=4000,
@@ -104,7 +131,7 @@ def call_ai(provider: str, model: str, prompt: str, client, temperature: float =
                 log_cost_event(provider, model, call_context, response=response, status="success")
                 return response.content[0].text
                 
-            elif provider == "gemini":
+            elif provider_key == "gemini":
                 # Usando o SDK google-genai com configuração de temperatura e formato JSON
                 from google import genai
                 config = genai.types.GenerateContentConfig(
