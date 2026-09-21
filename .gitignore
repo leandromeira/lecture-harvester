@@ -42,3 +42,6 @@ ehthumbs.db
 # Agent skills and tools dependencies
 .agents/
 skills-lock.json
+
+# Scratch & temporary diagnostic files
+scratch/
