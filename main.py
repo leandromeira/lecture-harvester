@@ -27,7 +27,50 @@ logger = setup_processing_logger()
 RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parent / "data" / "processed"
 
-def run_full_pipeline(mock=False, limit=None, use_ai=False, course_id=None, skip_enrich=False, force_markdown=False):
+def clean_filename(name):
+    """Remove caracteres inválidos para nomes de arquivos e diretórios."""
+    import re
+    return re.sub(r'[\\/*?:"<>|]', '', name).strip()
+
+def get_pending_lessons_from_index():
+    """Identifica no course_index.json quais aulas ainda não foram extraídas em data/raw/."""
+    index_file = RAW_DIR / "course_index.json"
+    if not index_file.exists():
+        return []
+    try:
+        import json
+        with open(index_file, "r", encoding="utf-8") as f:
+            course_data = json.load(f)
+    except Exception as e:
+        logger.error(f"Erro ao ler course_index.json: {e}")
+        return []
+
+    pending = []
+    curso_nome = course_data.get("curso", os.getenv("COURSE_NAME", "MBA em Engenharia de Software com IA"))
+    for mod in course_data.get("modulos", []):
+        m_name = mod.get("modulo", "Modulo Desconhecido")
+        m_clean = clean_filename(m_name)
+        for aula in mod.get("aulas", []):
+            sub = aula.get("subpasta")
+            slug = aula.get("slug")
+            slug_clean = clean_filename(slug or "aula_desconhecida")
+            if sub:
+                output_path = RAW_DIR / m_clean / clean_filename(sub) / f"{slug_clean}.json"
+            else:
+                output_path = RAW_DIR / m_clean / f"{slug_clean}.json"
+
+            if not output_path.exists():
+                pending.append({
+                    "curso": curso_nome,
+                    "modulo": m_name,
+                    "titulo": aula.get("titulo"),
+                    "url": aula.get("url"),
+                    "slug": slug,
+                    "subpasta": sub
+                })
+    return pending
+
+def run_full_pipeline(mock=False, limit=None, use_ai=False, course_id=None, skip_enrich=False, force_markdown=False, skip_sync=False):
     """
     Executa o fluxo completo do pipeline (ETL):
     1. Sincroniza o índice do curso (sync).
@@ -42,7 +85,6 @@ def run_full_pipeline(mock=False, limit=None, use_ai=False, course_id=None, skip
     # 1. Sync
     if mock:
         logger.info("[MOCK] Ignorando sincronização com a plataforma real.")
-        # Criar dados estruturados falsos no índice se não existir
         new_lessons = [
             {
                 "modulo": "Módulo 01 - Engenharia de Prompt",
@@ -57,6 +99,9 @@ def run_full_pipeline(mock=False, limit=None, use_ai=False, course_id=None, skip
                 "url": "https://plataforma.exemplo.com/aulas/system-prompts"
             }
         ]
+    elif skip_sync:
+        logger.info("Pulando sincronização com a plataforma (--skip-sync ativado). Buscando aulas pendentes no índice...")
+        new_lessons = get_pending_lessons_from_index()
     else:
         # Tenta login automático antes de iniciar o crawl
         if not login():
@@ -64,11 +109,17 @@ def run_full_pipeline(mock=False, limit=None, use_ai=False, course_id=None, skip
             return
         
         new_lessons = crawl_course(sync_mode=True, course_id=course_id)
+        # Mescla com quaisquer outras aulas do índice que ainda estejam pendentes
+        pending = get_pending_lessons_from_index()
+        urls_in_new = {l["url"] for l in new_lessons}
+        for p in pending:
+            if p["url"] not in urls_in_new:
+                new_lessons.append(p)
 
     if not new_lessons:
-        logger.info("Nenhuma aula nova detectada. Verificando se existem JSONs locais pendentes de processamento...")
+        logger.info("Nenhuma aula nova ou pendente detectada no índice. Verificando se existem JSONs locais pendentes de processamento...")
     else:
-        logger.info(f"Detectadas {len(new_lessons)} novas aulas para extração.")
+        logger.info(f"Total de {len(new_lessons)} nova(s)/pendente(s) aula(s) para extração.")
 
     # 2. Extração
     max_lessons = limit or int(os.getenv("MAX_LESSONS_PER_RUN", 10))
@@ -198,6 +249,7 @@ def main():
     parser_pipe.add_argument("--skip-enrich", action="store_true", help="Pula a etapa de enriquecimento de materiais de apoio (Notion/GitHub)")
     parser_pipe.add_argument("--course-id", type=str, help="ID do curso na plataforma para sincronizar no pipeline")
     parser_pipe.add_argument("--force-markdown", action="store_true", help="Força a regeneração de todas as notas do Obsidian no pipeline")
+    parser_pipe.add_argument("--skip-sync", action="store_true", help="Pula a etapa de sync/crawl se o índice já estiver atualizado")
 
     args = parser.parse_args()
 
@@ -294,7 +346,8 @@ def main():
             use_ai=args.use_ai,
             course_id=args.course_id,
             skip_enrich=args.skip_enrich,
-            force_markdown=args.force_markdown
+            force_markdown=args.force_markdown,
+            skip_sync=getattr(args, "skip_sync", False)
         )
         
     else:

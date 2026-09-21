@@ -275,8 +275,21 @@ def generate_obsidian_markdown(raw_json_path: Path, processed_json_path: Path = 
     subpasta_original = raw_data.get("subpasta", "")
     subpasta_clean = clean_filename(subpasta_original) if subpasta_original else ""
     
-    # Nome do arquivo da aula no Obsidian (ex: Aula 03 - Prompt Engineering.md)
+    # Nome do arquivo da aula no Obsidian (ex: 01 - Introdução.md)
     aula_titulo = raw_data.get("aula", "Sem Título")
+    if not re.match(r'^\d+\s*-\s*', aula_titulo):
+        index_file = Path(__file__).resolve().parents[1] / "data" / "raw" / "course_index.json"
+        if index_file.exists():
+            try:
+                with open(index_file, "r", encoding="utf-8") as f_idx:
+                    idx_data = json.load(f_idx)
+                for mod in idx_data.get("modulos", []):
+                    for l in mod.get("aulas", []):
+                        if l.get("url") == raw_data.get("url") and re.match(r'^\d+\s*-\s*', l.get("titulo", "")):
+                            aula_titulo = l["titulo"]
+                            break
+            except Exception:
+                pass
     aula_clean = clean_filename(aula_titulo)
     
     if subpasta_clean:

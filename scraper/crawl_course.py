@@ -112,6 +112,10 @@ def crawl_course(sync_mode=True, course_id=None, list_courses=False):
             courses_url = "https://plataforma.fullcycle.com.br/courses"
             logger.info(f"Navegando para a listagem de cursos: {courses_url}")
             page.goto(courses_url, timeout=60000, wait_until="domcontentloaded")
+            if "login" in page.url:
+                logger.error("Sessão expirada ou inválida! O navegador foi redirecionado para a tela de login. Execute 'venv/bin/python scraper/login.py' para renovar sua sessão.")
+                return []
+
             try:
                 page.wait_for_selector('a[href*="/courses/"]', timeout=15000)
             except Exception:

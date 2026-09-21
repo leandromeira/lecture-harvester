@@ -1,6 +1,10 @@
 import os
 import sys
 import json
+import base64
+import gzip
+import html
+import re
 import argparse
 from urllib.parse import urlparse
 from pathlib import Path
@@ -22,9 +26,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # Seletores para os elementos da aula no Full Cycle
 SELECTORS = {
     "lesson_title": "h1, .MuiBreadcrumbs-ol li:last-child",
-    "transcript_item": "#panel-1 div > span:last-child",
+    "transcript_button": 'button:has-text("Transcrição")',
+    "transcript_item": ".css-1gie7yz, #panel-1 div > span:last-child",
     "summary_item": ".MuiTypography-h5 p, .MuiTypography-h5 h2"
 }
+
+def clean_html_transcript(raw_html):
+    """Remove tags HTML e decodifica entidades para obter texto limpo de transcrição."""
+    if not raw_html:
+        return ""
+    text = re.sub(r'<[^>]+>', ' ', raw_html)
+    text = html.unescape(text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 ATTACHMENT_EXTENSIONS = {
     ".pdf", ".ppt", ".pptx", ".zip", ".rar", ".7z",
@@ -302,109 +316,173 @@ def extract_lesson(url, modulo_nome, aula_titulo, slug, mock=False, curso_nome=N
         page = context.new_page()
 
         try:
+            api_payload = {}
+            def handle_conteudo_response(response):
+                if "/api/cursos/conteudo/" in response.url and response.status == 200:
+                    try:
+                        body = response.json()
+                        content_b64 = body.get("content")
+                        if content_b64:
+                            decompressed = gzip.decompress(base64.b64decode(content_b64)).decode("utf-8")
+                            api_payload.update(json.loads(decompressed))
+                    except Exception as err:
+                        logger.debug(f"Erro ao processar payload da API de conteúdo: {err}")
+
+            page.on("response", handle_conteudo_response)
+
             # Usar domcontentloaded e aguardar de forma inteligente o carregamento dos componentes React
             page.goto(url, timeout=int(os.getenv("PLAYWRIGHT_TIMEOUT", 30000)), wait_until="domcontentloaded")
+
+            # Validação imediata de sessão
+            if "login" in page.url:
+                logger.error("Sessão expirada ou inválida! O navegador foi redirecionado para a tela de login. Execute 'venv/bin/python scraper/login.py' para renovar sua sessão.")
+                return None
+
             try:
-                # Tenta esperar que o player de vídeo ou o resumo da aula apareça na tela
-                page.wait_for_selector('video, iframe[src*="mediadelivery"], iframe[src*="vimeo"], iframe[src*="youtube"], iframe[src*="panda"], .MuiTypography-h5', timeout=10000)
+                # Tenta esperar que o player de vídeo, botão de transcrição ou o resumo apareçam
+                page.wait_for_selector('video, iframe[src*="mediadelivery"], iframe[src*="vimeo"], iframe[src*="youtube"], iframe[src*="panda"], button:has-text("Transcrição"), .MuiTypography-h5, .css-19jvj66', timeout=10000)
             except Exception:
                 # Fallback de segurança caso a rede esteja lenta
                 page.wait_for_timeout(3000)
             
             # Delay de estabilização
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(2000)
 
-            # Priorizar o título recebido do índice (aula_titulo), caindo de volta para a extração do DOM
-            extracted_title = (aula_titulo or "").strip()
-            if not extracted_title:
+            # Título da aula: prioriza o da API, preservando numeração se presente no índice
+            raw_title = api_payload.get("titulo") or (aula_titulo or "").strip()
+            if not raw_title:
                 title_el = page.query_selector(SELECTORS["lesson_title"])
-                extracted_title = title_el.inner_text().strip() if title_el else "Sem título"
+                raw_title = title_el.inner_text().strip() if title_el else "Sem título"
 
-            # 1. Extrair resumo da aula (com retries para lidar com carregamento assíncrono do React)
+            if aula_titulo and re.match(r'^\d+\s*-\s*', aula_titulo) and not re.match(r'^\d+\s*-\s*', raw_title):
+                num_prefix = re.match(r'^(\d+\s*-\s*)', aula_titulo).group(1)
+                extracted_title = f"{num_prefix}{raw_title}"
+            else:
+                extracted_title = raw_title
+
+            # 1. Extrair resumo da aula (prioriza o markdown limpo da API com fallback para o DOM)
             resumo_original = ""
-            for attempt in range(1, 6):
-                resumo_elms = page.query_selector_all(SELECTORS["summary_item"])
-                resumo_texts = []
-                for el in resumo_elms:
-                    txt = el.inner_text().strip()
-                    if txt and txt not in resumo_texts:
-                        resumo_texts.append(txt)
-
-                # Fallback robusto caso não encontre elementos p ou h2 específicos (.MuiTypography-h5)
-                if not resumo_texts:
-                    fallback_elms = page.query_selector_all(".MuiTypography-h5")
-                    for el in fallback_elms:
+            if api_payload:
+                raw_summary = api_payload.get("transcription") or api_payload.get("texto")
+                if raw_summary:
+                    resumo_original = raw_summary.strip()
+                    logger.info("Resumo da aula obtido com sucesso diretamente via API interna.")
+            else:
+                # Fallback no DOM apenas se a API não respondeu
+                for attempt in range(1, 4):
+                    resumo_elms = page.query_selector_all(SELECTORS["summary_item"])
+                    resumo_texts = []
+                    for el in resumo_elms:
                         txt = el.inner_text().strip()
                         if txt and txt not in resumo_texts:
                             resumo_texts.append(txt)
 
-                resumo_original = "\n\n".join(resumo_texts).strip()
-                if resumo_original:
-                    logger.info(f"Resumo da aula encontrado com sucesso (tentativa {attempt}/5).")
-                    break
+                    if not resumo_texts:
+                        fallback_elms = page.query_selector_all(".MuiTypography-h5, .css-19jvj66")
+                        for el in fallback_elms:
+                            txt = el.inner_text().strip()
+                            if txt and txt not in resumo_texts:
+                                resumo_texts.append(txt)
 
-                # No segundo attempt, tenta clicar no botão "Resumo da Aula" para garantir que a aba esteja ativa
-                if attempt == 2:
-                    try:
-                        resumo_btn = page.locator('button', has_text="Resumo da Aula")
-                        if resumo_btn.is_visible():
-                            resumo_btn.click()
-                            logger.info("Clicou no botão 'Resumo da Aula' para forçar exibição da aba.")
-                    except Exception as btn_err:
-                        logger.debug(f"Erro ao tentar clicar no botão do resumo: {btn_err}")
+                    resumo_original = "\n\n".join(resumo_texts).strip()
+                    if resumo_original:
+                        logger.info(f"Resumo da aula encontrado com sucesso via DOM (tentativa {attempt}/3).")
+                        break
 
-                page.wait_for_timeout(1000)
+                    if attempt == 2:
+                        try:
+                            resumo_btn = page.locator('button', has_text="Resumo da Aula")
+                            if resumo_btn.is_visible():
+                                resumo_btn.click()
+                        except Exception as btn_err:
+                            logger.debug(f"Erro ao tentar clicar no botão do resumo: {btn_err}")
 
-            # Fallback secundário para aulas escritas ou sem vídeo (caso persista vazio)
-            if not resumo_original:
-                main_containers = page.query_selector_all("main, article, .MuiGrid-root")
-                main_texts = []
-                for mc in main_containers:
-                    # Evitar pegar menus laterais, cabeçalhos ou barras de navegação
-                    if mc.query_selector("video") or mc.query_selector("button[role='tab']"):
-                        continue
-                    txt = mc.inner_text().strip()
-                    if len(txt) > 200 and txt not in main_texts:
-                        main_texts.append(txt)
-                if main_texts:
-                    resumo_original = max(main_texts, key=len)
+                    page.wait_for_timeout(1000)
 
-            # 2. Clicar no botão da aba de transcrição
-            clicked = False
-            try:
-                # Localizar botão com o texto Transcrição
-                trans_btn = page.locator('button', has_text="Transcrição")
-                # Esperar estar visível (timeout de 5s)
-                trans_btn.wait_for(state="visible", timeout=5000)
-                # Clica e aguarda actionability (se estiver disabled, o Playwright esperará até que seja habilitado)
-                trans_btn.click(timeout=5000)
-                clicked = True
-            except Exception as e:
-                logger.debug(f"Não foi possível clicar no botão de Transcrição usando locator: {e}")
-                # Fallback secundário usando evaluate para compatibilidade
-                clicked = page.evaluate("""() => {
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    const transBtn = buttons.find(b => b.innerText.includes("Transcrição"));
-                    if (transBtn && !transBtn.disabled) {
-                        transBtn.click();
-                        return true;
-                    }
-                    return false;
-                }""")
+                # Fallback secundário para aulas escritas (sem poluir com menus ou barras laterais)
+                if not resumo_original:
+                    main_containers = page.query_selector_all("article, main")
+                    main_texts = []
+                    for mc in main_containers:
+                        if mc.query_selector("video") or mc.query_selector("button[role='tab']") or mc.query_selector("[id^='chapter-']"):
+                            continue
+                        txt = mc.inner_text().strip()
+                        if len(txt) > 200 and txt not in main_texts:
+                            main_texts.append(txt)
+                    if main_texts:
+                        resumo_original = max(main_texts, key=len)
 
+            # 2. Transcrição (prioriza a transcrição limpa da API com fallback para o DOM)
             transcricao = ""
-            if clicked:
-                # Aguarda renderização da transcrição (timeout de 3s)
-                page.wait_for_timeout(3000)
-                # Extrair o conteúdo da transcrição
-                trans_elms = page.query_selector_all(SELECTORS["transcript_item"])
-                trans_texts = [el.inner_text().strip() for el in trans_elms]
-                transcricao = " ".join([t for t in trans_texts if t])
+            if api_payload:
+                if api_payload.get("video_transcription_nivo"):
+                    transcricao = clean_html_transcript(api_payload["video_transcription_nivo"])
+                    if transcricao:
+                        logger.info("Transcrição obtida com sucesso diretamente via API interna.")
             else:
-                logger.warning(f"Aba de transcrição não disponível ou não pôde ser clicada para a aula {url}.")
+                # Fallback no DOM apenas se a API não respondeu
+                clicked = False
+                try:
+                    trans_btn = page.locator(SELECTORS["transcript_button"])
+                    trans_btn.wait_for(state="visible", timeout=5000)
+                    trans_btn.first.click(timeout=4000)
+                    clicked = True
+                except Exception as e:
+                    logger.debug(f"Não foi possível clicar no botão de Transcrição usando locator: {e}")
+                    clicked = page.evaluate("""() => {
+                        const buttons = Array.from(document.querySelectorAll('button'));
+                        const transBtn = buttons.find(b => b.innerText.includes("Transcrição"));
+                        if (transBtn && !transBtn.disabled) {
+                            transBtn.click();
+                            return true;
+                        }
+                        return false;
+                    }""")
+
+                if clicked:
+                    page.wait_for_timeout(2000)
+                    trans_texts = page.evaluate("""() => {
+                        // 1. Novo layout: spans de texto na barra lateral de transcrição (irmão de timestamp \\d\\d:\\d\\d)
+                        const items = Array.from(document.querySelectorAll('div > span:last-child'));
+                        const validSpans = items.filter(s => {
+                            const prev = s.previousElementSibling;
+                            return prev && /\\d{2}:\\d{2}/.test(prev.innerText.trim());
+                        });
+                        if (validSpans.length > 0) {
+                            return validSpans.map(s => s.innerText.trim()).filter(Boolean);
+                        }
+
+                        // 2. Fallback por classes CSS conhecidas
+                        const cssSpans = Array.from(document.querySelectorAll('.css-1gie7yz'));
+                        if (cssSpans.length > 0) {
+                            return cssSpans.map(s => s.innerText.trim()).filter(Boolean);
+                        }
+
+                        // 3. Fallback legado (#panel-1)
+                        const legacySpans = Array.from(document.querySelectorAll('#panel-1 div > span:last-child'));
+                        return legacySpans.map(s => s.innerText.trim()).filter(Boolean);
+                    }""")
+                    transcricao = " ".join([t for t in trans_texts if t]).strip()
+                    if transcricao:
+                        logger.info("Transcrição obtida com sucesso via DOM.")
+                else:
+                    logger.warning(f"Aba de transcrição não disponível ou não pôde ser clicada para a aula {url}.")
 
             # 3. Materiais de apoio (downloads e links)
             materials = collect_support_materials(page)
+            # Se a API retornou repositório ou links adicionais, incorpora aos materiais
+            if api_payload.get("repositorio"):
+                repo_url = api_payload["repositorio"].strip()
+                if repo_url and not any(m.get("url") == repo_url for m in materials):
+                    materials.append({
+                        "titulo": "Repositório da Aula",
+                        "url": repo_url,
+                        "tipo": detect_material_type("Repositório da Aula", repo_url),
+                        "baixado": False,
+                        "arquivo_local": None,
+                        "status": "pendente_enriquecimento"
+                    })
+
             support_materials = download_support_materials(page, materials, attachments_dir) if materials else []
 
             data = {

@@ -1,6 +1,9 @@
 import os
 import sys
 import json
+import base64
+import gzip
+import html
 import re
 from pathlib import Path
 from playwright.sync_api import sync_playwright
@@ -15,6 +18,15 @@ STATE_PATH = PROJECT_ROOT / "config" / "storage_state.json"
 sys.path.append(str(PROJECT_ROOT))
 from pipeline.generate_markdown import generate_obsidian_markdown
 from pipeline.ai_summarizer import process_lesson_ai
+
+def clean_html_transcript(raw_html):
+    """Remove tags HTML e decodifica entidades para obter texto limpo de transcrição."""
+    if not raw_html:
+        return ""
+    text = re.sub(r'<[^>]+>', ' ', raw_html)
+    text = html.unescape(text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 def clean_slug(text):
     """Gera um slug amigável a partir do título."""
@@ -109,67 +121,90 @@ def extract_content_from_platform(page, url, need_summary, need_transcription):
     transcricao = ""
     
     try:
+        api_payload = {}
+        def handle_response(response):
+            if "/api/cursos/conteudo/" in response.url and response.status == 200:
+                try:
+                    body = response.json()
+                    content_b64 = body.get("content")
+                    if content_b64:
+                        decompressed = gzip.decompress(base64.b64decode(content_b64)).decode("utf-8")
+                        api_payload.update(json.loads(decompressed))
+                except Exception:
+                    pass
+
+        page.on("response", handle_response)
         page.goto(url, timeout=30000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
+
+        if "login" in page.url:
+            print("    Sessão expirada! Redirecionado para a tela de login.")
+            return "", ""
         
         # 1. Extração do resumo se necessário
         if need_summary:
-            for attempt in range(1, 6):
-                resumo_elms = page.query_selector_all(".MuiTypography-h5 p, .MuiTypography-h5 h2")
-                resumo_texts = []
-                for el in resumo_elms:
-                    txt = el.inner_text().strip()
-                    if txt and txt not in resumo_texts:
-                        resumo_texts.append(txt)
-                
-                if not resumo_texts:
-                    fallback_elms = page.query_selector_all(".MuiTypography-h5")
-                    for el in fallback_elms:
+            if api_payload.get("transcription"):
+                resumo_original = api_payload["transcription"].strip()
+            
+            if not resumo_original:
+                for attempt in range(1, 6):
+                    resumo_elms = page.query_selector_all(".MuiTypography-h5 p, .MuiTypography-h5 h2")
+                    resumo_texts = []
+                    for el in resumo_elms:
                         txt = el.inner_text().strip()
                         if txt and txt not in resumo_texts:
                             resumo_texts.append(txt)
-                
-                resumo_original = "\n\n".join(resumo_texts).strip()
-                if resumo_original:
-                    break
                     
-                if attempt == 2:
-                    try:
-                        resumo_btn = page.locator('button', has_text="Resumo da Aula")
-                        if resumo_btn.is_visible():
-                            resumo_btn.click()
-                    except:
-                        pass
-                page.wait_for_timeout(1000)
+                    if not resumo_texts:
+                        fallback_elms = page.query_selector_all(".MuiTypography-h5, .css-19jvj66")
+                        for el in fallback_elms:
+                            txt = el.inner_text().strip()
+                            if txt and txt not in resumo_texts:
+                                resumo_texts.append(txt)
+                    
+                    resumo_original = "\n\n".join(resumo_texts).strip()
+                    if resumo_original:
+                        break
+                        
+                    if attempt == 2:
+                        try:
+                            resumo_btn = page.locator('button', has_text="Resumo da Aula")
+                            if resumo_btn.is_visible():
+                                resumo_btn.click()
+                        except:
+                            pass
+                    page.wait_for_timeout(1000)
                 
         # 2. Extração de transcrição se necessário
         if need_transcription:
-            for attempt in range(1, 6):
-                # Tentar clicar no botão nas primeiras tentativas
-                if attempt in (1, 2):
-                    try:
-                        trans_btn = page.locator('button', has_text="Transcrição")
-                        if trans_btn.is_visible():
-                            trans_btn.click(timeout=3000)
-                    except:
-                        pass
-                
-                page.wait_for_timeout(1500)
-                
-                # Buscar elementos da transcrição
-                trans_elms = page.query_selector_all("#panel-1 div > span:last-child")
-                if not trans_elms:
-                    trans_elms = page.query_selector_all("#panel-1 span")
-                
-                trans_texts = [el.inner_text().strip() for el in trans_elms]
-                # Filtrar timestamps
-                trans_texts = [t for t in trans_texts if t and not re.match(r'^\d{2}:\d{2}(:\d{2})?$', t)]
-                
-                transcricao = " ".join(trans_texts).strip()
-                if transcricao:
-                    break
-                    
-                page.wait_for_timeout(1000)
+            if api_payload.get("video_transcription_nivo"):
+                transcricao = clean_html_transcript(api_payload["video_transcription_nivo"])
+
+            if not transcricao:
+                clicked = False
+                try:
+                    trans_btn = page.locator('button:has-text("Transcrição")')
+                    if trans_btn.count() > 0:
+                        trans_btn.first.click(timeout=3000)
+                        clicked = True
+                except:
+                    pass
+
+                if clicked:
+                    page.wait_for_timeout(2000)
+                    trans_texts = page.evaluate("""() => {
+                        const items = Array.from(document.querySelectorAll('div > span:last-child'));
+                        const validSpans = items.filter(s => {
+                            const prev = s.previousElementSibling;
+                            return prev && /\\d{2}:\\d{2}/.test(prev.innerText.trim());
+                        });
+                        if (validSpans.length > 0) return validSpans.map(s => s.innerText.trim()).filter(Boolean);
+                        const cssSpans = Array.from(document.querySelectorAll('.css-1gie7yz'));
+                        if (cssSpans.length > 0) return cssSpans.map(s => s.innerText.trim()).filter(Boolean);
+                        const legacySpans = Array.from(document.querySelectorAll('#panel-1 div > span:last-child'));
+                        return legacySpans.map(s => s.innerText.trim()).filter(Boolean);
+                    }""")
+                    transcricao = " ".join(trans_texts).strip()
                 
         return resumo_original, transcricao
         
